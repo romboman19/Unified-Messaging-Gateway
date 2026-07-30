@@ -61,15 +61,30 @@ export class MessagesService {
       );
     }
 
-    const account = await this.prisma.transportAccount.findFirst({
-      where: { adapter: 'mock' },
-      include: { endpoints: { where: { enabled: true } } },
-    });
-    if (!account || account.endpoints.length === 0) {
-      throw new UnprocessableEntityException('Mock endpoint недоступний.');
+    // Respect caller-provided account/endpoint; fall back to the first enabled mock endpoint.
+    let accountId = dto.accountId;
+    let endpointId = dto.endpointId;
+    if (!accountId || !endpointId) {
+      const account = await this.prisma.transportAccount.findFirst({
+        where: { adapter: 'mock' },
+        include: { endpoints: { where: { enabled: true } } },
+        orderBy: { createdAt: 'desc' },
+      });
+      if (!account || account.endpoints.length === 0) {
+        throw new UnprocessableEntityException('Mock endpoint недоступний.');
+      }
+      accountId = account.id;
+      endpointId = account.endpoints[0].id;
+    } else {
+      const endpoint = await this.prisma.endpoint.findFirst({
+        where: { id: endpointId, accountId, enabled: true },
+      });
+      if (!endpoint) {
+        throw new UnprocessableEntityException('Mock endpoint недоступний.');
+      }
     }
-    dto.accountId = account.id;
-    dto.endpointId = account.endpoints[0].id;
+    dto.accountId = accountId;
+    dto.endpointId = endpointId;
 
     const requestHash = this.hashRequest(dto);
     if (idempotencyKey) {
