@@ -1,0 +1,1134 @@
+openapi: 3.0.3
+info:
+  title: Unified Messaging Gateway (UMG) API
+  description: |
+    Єдиний REST API для SMS, WhatsApp та Signal.
+
+    This document describes both the live Milestone 0/1 surface and the target
+    state of the API. Operations that are specified but **not yet live** are
+    marked with `[Planned]` in their summary/description.
+
+    ## Authentication
+
+    Two independent schemes are used:
+
+    - **Admin session (cookie)** — obtained via `POST /api/v1/auth/login`.
+      Used by the Web UI for administrative operations (tokens, channels,
+      routing rules, destinations, alerts).
+    - **Global API token (Bearer)** — generated in the UI, stored hashed in
+      the database. Used by external API clients (n8n, Chatwoot, scripts)
+      for sending and reading messages:
+      `Authorization: Bearer <GLOBAL_API_TOKEN>`.
+
+    ## Idempotency
+
+    `POST /api/v1/messages` accepts an `Idempotency-Key` header. Repeating the
+    same key returns the originally created message instead of creating a
+    duplicate. Keys expire after 7 days.
+
+    ## Errors
+
+    All errors use the common envelope defined in the `Error` schema
+    (spec §14.4). User-facing `message` strings are in Ukrainian.
+  version: 0.2.0
+  contact:
+    name: UMG maintainers
+servers:
+  - url: /api/v1
+    description: Behind the nginx reverse proxy (default port 8083)
+tags:
+  - name: auth
+    description: Admin session authentication
+  - name: api-tokens
+    description: Global API token management (admin session)
+  - name: messages
+    description: Outbound/inbound messages (Bearer token)
+  - name: transport-accounts
+    description: Transport accounts and endpoints / channels (admin session)
+  - name: routing
+    description: Routing rules engine [Planned]
+  - name: destinations
+    description: Webhook / email / Telegram destinations [Planned]
+  - name: deliveries
+    description: Webhook delivery log, DLQ and replay [Planned]
+  - name: attachments
+    description: Media / attachment storage [Planned]
+  - name: alerts
+    description: Alert engine [Planned]
+  - name: health
+    description: Liveness / readiness
+
+paths:
+  /auth/login:
+    post:
+      tags: [auth]
+      summary: Log in as admin
+      description: |
+        Creates a server-side session (stored in Redis) and returns a
+        `umg.session` HttpOnly, SameSite=Strict cookie. Session idle timeout
+        is 12 hours. Rate-limited; repeated failures cause timed lockout.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: { type: string, example: admin }
+                password: { type: string, format: password }
+      responses:
+        '200':
+          description: Session created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user: { $ref: '#/components/schemas/AdminUser' }
+        '401':
+          description: Невірний логін або пароль.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example:
+                error:
+                  code: INVALID_CREDENTIALS
+                  message: Невірний логін або пароль.
+                  details: null
+                  request_id: req_...
+        '429':
+          description: Rate limit / lockout
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /auth/logout:
+    post:
+      tags: [auth]
+      summary: Log out
+      security:
+        - sessionCookie: []
+      responses:
+        '200':
+          description: Session destroyed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, example: true }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /auth/me:
+    get:
+      tags: [auth]
+      summary: Current admin user
+      security:
+        - sessionCookie: []
+      responses:
+        '200':
+          description: Current user
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminUser' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api-tokens:
+    get:
+      tags: [api-tokens]
+      summary: List API tokens (metadata only)
+      description: Returns token metadata. The token plaintext is only shown once at generation time.
+      security:
+        - sessionCookie: []
+      responses:
+        '200':
+          description: Token list
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ApiTokenMetadata' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [api-tokens]
+      summary: Generate a new global API token
+      description: |
+        Generates a cryptographically secure token, stores only its hash.
+        The plaintext token is returned once in this response and cannot be
+        retrieved later. Revoke the previous token after switching clients.
+      security:
+        - sessionCookie: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string, example: n8n-integration }
+      responses:
+        '200':
+          description: New token (plaintext shown once)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiTokenCreated' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api-tokens/{id}:
+    delete:
+      tags: [api-tokens]
+      summary: Revoke an API token
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: Token revoked
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, example: true }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /messages:
+    post:
+      tags: [messages]
+      summary: Send a message
+      description: |
+        Enqueues an outbound message and returns `202 Accepted`-style body
+        (HTTP 200 in the current implementation) with status `queued`
+        (or `scheduled` when `scheduled_at` is set).
+
+        Delivery is asynchronous: the worker performs up to 3 attempts
+        (immediately, +60 s, +60 s — ADR-013). No automatic channel failover
+        (ADR-012).
+
+        Idempotency: pass a unique `Idempotency-Key` header per logical send.
+        Repeats return the original message; a key reused with a different
+        payload yields `409`.
+      security:
+        - bearerToken: []
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema: { type: string, example: ord-123-msg-1 }
+          description: Client-generated unique key; stored for 7 days.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SendMessageRequest' }
+            example:
+              channel: sms
+              account_id: 0191aaaa-0000-7000-8000-000000000001
+              endpoint_id: 0191aaaa-0000-7000-8000-000000000002
+              to: "+380671234567"
+              type: text
+              content: { text: "Тестове повідомлення" }
+              attachments: []
+              reply_to_message_id: null
+              scheduled_at: null
+              metadata: { source: n8n, external_order_id: ORD-123 }
+      responses:
+        '200':
+          description: Message accepted
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SendMessageResponse' }
+              example:
+                id: 0191bbbb-0000-7000-8000-000000000003
+                status: queued
+                scheduled_at: null
+                created_at: "2026-07-29T18:00:00Z"
+        '400':
+          description: Invalid JSON body
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409':
+          description: Idempotency / state conflict
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example:
+                error:
+                  code: IDEMPOTENCY_CONFLICT
+                  message: Ключ ідемпотентності вже використано з іншим запитом.
+                  details: null
+                  request_id: req_...
+        '422':
+          description: Validation or endpoint capability error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example:
+                error:
+                  code: ENDPOINT_UNAVAILABLE
+                  message: Endpoint тимчасово недоступний.
+                  details: { endpoint_id: 0191... }
+                  request_id: req_...
+        '503':
+          description: Queue/DB dependency unavailable
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    get:
+      tags: [messages]
+      summary: List messages
+      description: |
+        Returns messages newest first with attempts and status history,
+        paginated server-side. `limit` capped at 100.
+      security:
+        - bearerToken: []
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50, maximum: 100 }
+        - name: offset
+          in: query
+          schema: { type: integer, default: 0 }
+      responses:
+        '200':
+          description: Page of messages
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Message' }
+                  count: { type: integer }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /messages/{id}:
+    get:
+      tags: [messages]
+      summary: Get message by id
+      description: Includes delivery attempts (`attempts`) and full `statusHistory`.
+      security:
+        - bearerToken: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: Message
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Message' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: Повідомлення не знайдено.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /transport-accounts:
+    get:
+      tags: [transport-accounts]
+      summary: List transport accounts
+      description: Includes nested `endpoints`.
+      security:
+        - sessionCookie: []
+      responses:
+        '200':
+          description: Account list
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/TransportAccount' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [transport-accounts]
+      summary: Create transport account
+      security:
+        - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TransportAccountCreate' }
+      responses:
+        '200':
+          description: Created account
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TransportAccount' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/Validation' }
+  /transport-accounts/{id}:
+    get:
+      tags: [transport-accounts]
+      summary: Get transport account
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: Account
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TransportAccount' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [transport-accounts]
+      summary: Update transport account
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TransportAccountUpdate' }
+      responses:
+        '200':
+          description: Updated account
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TransportAccount' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [transport-accounts]
+      summary: Delete transport account
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: Deleted
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /transport-accounts/{id}/endpoints:
+    post:
+      tags: [transport-accounts]
+      summary: Create endpoint under account
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EndpointCreate' }
+      responses:
+        '200':
+          description: Created endpoint
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Endpoint' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Validation' }
+  /endpoints/{id}:
+    patch:
+      tags: [transport-accounts]
+      summary: Update endpoint
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EndpointUpdate' }
+      responses:
+        '200':
+          description: Updated endpoint
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Endpoint' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [transport-accounts]
+      summary: Delete endpoint
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: Deleted
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /routing-rules:
+    get:
+      tags: [routing]
+      summary: "[Planned] List routing rules"
+      description: |
+        **Target state (Milestone 1+, may not yet be live).** Lists routing
+        rules of the event routing engine (spec §15). Filters: event type,
+        channel type, transport account, endpoint, direction, severity.
+      security:
+        - sessionCookie: []
+      responses:
+        '200':
+          description: Rule list
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/RoutingRule' }
+    post:
+      tags: [routing]
+      summary: "[Planned] Create routing rule"
+      description: "**Target state.** One canonical event may fan out to multiple destinations."
+      security:
+        - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RoutingRule' }
+      responses:
+        '200': { description: Created rule }
+  /routing-rules/{id}:
+    patch:
+      tags: [routing]
+      summary: "[Planned] Update routing rule"
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RoutingRule' }
+      responses:
+        '200': { description: Updated rule }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [routing]
+      summary: "[Planned] Delete routing rule"
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200': { description: Deleted }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /destinations:
+    get:
+      tags: [destinations]
+      summary: "[Planned] List webhook destinations"
+      description: |
+        **Target state.** Destination types: `webhook`, `email`, `telegram`,
+        `internal_log` (spec §15–17). Secrets (webhook signing secret, SMTP
+        password, Telegram bot token) are encrypted at rest and never returned.
+      security:
+        - sessionCookie: []
+      responses:
+        '200':
+          description: Destination list
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/WebhookDestination' }
+    post:
+      tags: [destinations]
+      summary: "[Planned] Create destination"
+      security:
+        - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WebhookDestination' }
+      responses:
+        '200': { description: Created destination }
+  /destinations/{id}:
+    patch:
+      tags: [destinations]
+      summary: "[Planned] Update destination"
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200': { description: Updated destination }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [destinations]
+      summary: "[Planned] Delete destination"
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200': { description: Deleted }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /destinations/{id}/test:
+    post:
+      tags: [destinations]
+      summary: "[Planned] Send test event to destination"
+      description: |
+        **Target state.** Delivers a synthetic test event through the
+        destination (webhook POST with signature headers, test email, or test
+        Telegram message) and returns the delivery result synchronously.
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: Test delivery result
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebhookDelivery' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /deliveries:
+    get:
+      tags: [deliveries]
+      summary: "[Planned] List webhook deliveries"
+      description: |
+        **Target state.** Delivery log with filtering by destination, state
+        (`pending`, `delivered`, `failed`, `dead_lettered`) and event type.
+        Webhook attempts: 0 s, 60 s, 300 s, 900 s, 3600 s; after the 5th
+        failure the delivery is `dead_lettered` and an alert is raised
+        (spec §15.5).
+      security:
+        - sessionCookie: []
+      parameters:
+        - name: destination_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: state
+          in: query
+          schema:
+            type: string
+            enum: [pending, delivered, failed, dead_lettered]
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50, maximum: 100 }
+        - name: offset
+          in: query
+          schema: { type: integer, default: 0 }
+      responses:
+        '200':
+          description: Delivery page
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/WebhookDelivery' }
+                  count: { type: integer }
+  /deliveries/{id}/replay:
+    post:
+      tags: [deliveries]
+      summary: "[Planned] Manually replay a delivery"
+      description: |
+        **Target state.** Creates a new delivery attempt with the same event
+        id and a new delivery id (spec §15.5). Audit-logged as a manual
+        replay.
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: New delivery created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebhookDelivery' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /attachments:
+    post:
+      tags: [attachments]
+      summary: "[Planned] Upload attachment"
+      description: |
+        **Target state.** `multipart/form-data` upload to local media storage.
+        Returns an attachment id usable in `SendMessageRequest.attachments`.
+        Size limit: `413` when exceeded.
+      security:
+        - bearerToken: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: { type: string, format: binary }
+      responses:
+        '200':
+          description: Attachment created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Attachment' }
+        '413': { description: Payload too large }
+  /attachments/{id}:
+    get:
+      tags: [attachments]
+      summary: "[Planned] Download attachment via signed URL"
+      description: |
+        **Target state.** Returns a short-lived signed download URL (or
+        redirects to it). Attachments have configurable retention (ADR-015);
+        expired files return `410`.
+      security:
+        - bearerToken: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: Signed URL
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  url: { type: string }
+                  expires_at: { type: string, format: date-time }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '410': { description: Retention expired }
+
+  /alerts:
+    get:
+      tags: [alerts]
+      summary: "[Planned] List alerts"
+      description: |
+        **Target state.** Stateful incidents (`open`, `acknowledged`,
+        `resolved`) raised by the alert engine (spec §18): channel down,
+        webhook dead-lettered, queue backlog, storage low, etc.
+      security:
+        - sessionCookie: []
+      parameters:
+        - name: state
+          in: query
+          schema:
+            type: string
+            enum: [open, acknowledged, resolved]
+      responses:
+        '200':
+          description: Alert list
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Alert' }
+
+  /health/live:
+    get:
+      tags: [health]
+      summary: Liveness probe
+      security: []
+      responses:
+        '200':
+          description: Process is alive
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+                  service: { type: string, example: umg-api }
+  /health/ready:
+    get:
+      tags: [health]
+      summary: Readiness probe (DB check)
+      security: []
+      responses:
+        '200':
+          description: Readiness result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [ready, not_ready] }
+                  service: { type: string }
+                  error: { type: string }
+  /health/details:
+    get:
+      tags: [health]
+      summary: Detailed health (admin only in target state)
+      description: "Target state: restricted to admin session / LAN allowlist."
+      responses:
+        '200':
+          description: Component health details
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  service: { type: string }
+                  version: { type: string }
+                  database: { type: string, enum: [healthy, unhealthy] }
+
+components:
+  securitySchemes:
+    bearerToken:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+      description: Global API token, generated in the admin UI.
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: umg.session
+      description: Admin session cookie (HttpOnly, SameSite=Strict, 12 h idle).
+
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid credentials
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example:
+            error:
+              code: UNAUTHORIZED
+              message: Потрібна авторизація.
+              details: null
+              request_id: req_...
+    NotFound:
+      description: Entity not found
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example:
+            error:
+              code: NOT_FOUND
+              message: Об'єкт не знайдено.
+              details: null
+              request_id: req_...
+    Conflict:
+      description: State conflict
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Validation:
+      description: Validation error
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example:
+            error:
+              code: VALIDATION_ERROR
+              message: Помилка валідації запиту.
+              details: { fields: [] }
+              request_id: req_...
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, request_id]
+          properties:
+            code:
+              type: string
+              example: ENDPOINT_UNAVAILABLE
+            message:
+              type: string
+              description: Ukrainian user-facing message
+              example: Endpoint тимчасово недоступний.
+            details:
+              type: object
+              nullable: true
+            request_id:
+              type: string
+              example: req_9f8a7b
+      description: Common error envelope (spec §14.4).
+
+    AdminUser:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        username: { type: string, example: admin }
+        last_login_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+
+    ApiTokenMetadata:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        created_at: { type: string, format: date-time }
+        last_used_at: { type: string, format: date-time, nullable: true }
+        revoked_at: { type: string, format: date-time, nullable: true }
+
+    ApiTokenCreated:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        token:
+          type: string
+          description: Plaintext token, shown once.
+        created_at: { type: string, format: date-time }
+
+    ChannelType:
+      type: string
+      enum: [sms, whatsapp, signal, mock]
+
+    TransportStatus:
+      type: string
+      enum: [active, inactive, degraded, disabled]
+
+    MessageType:
+      type: string
+      enum: [text, image, audio, voice, video, document, sticker, location, contact, reaction, reply, interactive, poll, system, unknown]
+
+    MessageStatus:
+      type: string
+      enum: [created, scheduled, queued, dispatching, accepted, sent, delivered, read, failed, cancelled, expired, unknown, received, assembling, incomplete, processed, forwarded, forward_failed]
+
+    SendMessageRequest:
+      type: object
+      required: [channel, to, type, content]
+      properties:
+        channel: { $ref: '#/components/schemas/ChannelType' }
+        account_id:
+          type: string
+          format: uuid
+          description: Optional when the channel can be auto-resolved (e.g. mock).
+        endpoint_id: { type: string, format: uuid }
+        to:
+          type: string
+          description: Recipient. Canonical phone format is E.164 (ADR-016).
+          example: "+380671234567"
+        type: { $ref: '#/components/schemas/MessageType' }
+        content:
+          type: object
+          description: Type-dependent payload, e.g. `{ "text": "..." }`.
+          example: { text: "Тестове повідомлення" }
+        attachments:
+          type: array
+          items: { type: string, format: uuid }
+          description: Attachment ids previously uploaded via /attachments.
+        reply_to_message_id: { type: string, nullable: true }
+        scheduled_at:
+          type: string
+          format: date-time
+          nullable: true
+        metadata:
+          type: object
+          description: Free-form client metadata echoed into events.
+
+    SendMessageResponse:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        status:
+          type: string
+          enum: [queued, scheduled]
+        scheduled_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+
+    MessageAttempt:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        attempt_no: { type: integer }
+        started_at: { type: string, format: date-time }
+        finished_at: { type: string, format: date-time, nullable: true }
+        result: { type: string }
+        error_json: { type: object, nullable: true }
+
+    MessageStatusHistoryEntry:
+      type: object
+      properties:
+        status: { $ref: '#/components/schemas/MessageStatus' }
+        source: { type: string, example: api }
+        created_at: { type: string, format: date-time }
+
+    Message:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        direction: { type: string, enum: [inbound, outbound] }
+        channel_type: { $ref: '#/components/schemas/ChannelType' }
+        account_id: { type: string, format: uuid }
+        endpoint_id: { type: string, format: uuid }
+        conversation_id: { type: string, format: uuid, nullable: true }
+        external_id: { type: string, nullable: true }
+        message_type: { $ref: '#/components/schemas/MessageType' }
+        status: { $ref: '#/components/schemas/MessageStatus' }
+        from_json: { type: object, description: "{ raw, e164, display }" }
+        to_json: { type: object, description: "{ raw, e164, display }" }
+        content_json: { type: object }
+        metadata_json: { type: object }
+        scheduled_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        attempts:
+          type: array
+          items: { $ref: '#/components/schemas/MessageAttempt' }
+        status_history:
+          type: array
+          items: { $ref: '#/components/schemas/MessageStatusHistoryEntry' }
+
+    TransportAccount:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        type: { $ref: '#/components/schemas/ChannelType' }
+        adapter: { type: string, example: mock }
+        name: { type: string }
+        status: { $ref: '#/components/schemas/TransportStatus' }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        endpoints:
+          type: array
+          items: { $ref: '#/components/schemas/Endpoint' }
+      description: `encrypted_config` is never returned by the API.
+
+    TransportAccountCreate:
+      type: object
+      required: [type, adapter, name]
+      properties:
+        type: { $ref: '#/components/schemas/ChannelType' }
+        adapter:
+          type: string
+          example: mock
+          description: "mock | goip-vendor | unoapi | signal-cli-rest-api (planned adapters)"
+        name: { type: string }
+        status: { $ref: '#/components/schemas/TransportStatus' }
+        config:
+          type: object
+          description: Adapter-specific config; secrets are encrypted at rest.
+
+    TransportAccountUpdate:
+      type: object
+      properties:
+        name: { type: string }
+        status: { $ref: '#/components/schemas/TransportStatus' }
+        config: { type: object }
+
+    Endpoint:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        account_id: { type: string, format: uuid }
+        label: { type: string }
+        external_id: { type: string, nullable: true, example: sim-slot-1 }
+        phone_raw: { type: string, nullable: true }
+        phone_e164: { type: string, nullable: true, example: "+380671234567" }
+        enabled: { type: boolean }
+        config_json: { type: object }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    EndpointCreate:
+      type: object
+      required: [label]
+      properties:
+        label: { type: string }
+        external_id: { type: string }
+        phone_raw: { type: string }
+        phone_e164: { type: string }
+        enabled: { type: boolean }
+        config: { type: object }
+
+    EndpointUpdate:
+      allOf:
+        - $ref: '#/components/schemas/EndpointCreate'
+
+    RoutingRule:
+      type: object
+      description: "[Planned] Spec §15.1 — filters + destination references."
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        enabled: { type: boolean }
+        filters:
+          type: object
+          properties:
+            event_types:
+              type: array
+              items: { type: string, example: message.received }
+            channel_types:
+              type: array
+              items: { $ref: '#/components/schemas/ChannelType' }
+            account_ids: { type: array, items: { type: string, format: uuid } }
+            endpoint_ids: { type: array, items: { type: string, format: uuid } }
+            direction: { type: string, enum: [inbound, outbound] }
+            severity: { type: string, enum: [info, warning, critical] }
+        destination_ids:
+          type: array
+          items: { type: string, format: uuid }
+
+    WebhookDestination:
+      type: object
+      description: "[Planned] Spec §15–17."
+      properties:
+        id: { type: string, format: uuid }
+        type: { type: string, enum: [webhook, email, telegram, internal_log] }
+        name: { type: string }
+        enabled: { type: boolean }
+        config:
+          type: object
+          description: |
+            Type-specific config. `webhook`: `url`, signing `secret`
+            (write-only). `email`: SMTP host/port/TLS, sender, recipients,
+            templates. `telegram`: bot token (write-only), chat id, parse mode.
+        created_at: { type: string, format: date-time }
+
+    WebhookDelivery:
+      type: object
+      description: "[Planned] Spec §15.5."
+      properties:
+        id: { type: string, format: uuid }
+        destination_id: { type: string, format: uuid }
+        event_id: { type: string, example: evt_0191... }
+        event_type: { type: string, example: message.received }
+        state: { type: string, enum: [pending, delivered, failed, dead_lettered] }
+        attempt: { type: integer }
+        next_attempt_at: { type: string, format: date-time, nullable: true }
+        response_status: { type: integer, nullable: true }
+        response_body_excerpt: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+
+    Attachment:
+      type: object
+      description: "[Planned]"
+      properties:
+        id: { type: string, format: uuid }
+        filename: { type: string }
+        content_type: { type: string }
+        size_bytes: { type: integer }
+        created_at: { type: string, format: date-time }
+
+    Alert:
+      type: object
+      description: "[Planned] Spec §18."
+      properties:
+        id: { type: string, format: uuid }
+        type: { type: string, example: channel.degraded }
+        severity: { type: string, enum: [info, warning, critical] }
+        state: { type: string, enum: [open, acknowledged, resolved] }
+        message: { type: string, description: Ukrainian text }
+        created_at: { type: string, format: date-time }
+        acknowledged_at: { type: string, format: date-time, nullable: true }
+        resolved_at: { type: string, format: date-time, nullable: true }
