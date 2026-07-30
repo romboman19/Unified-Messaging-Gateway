@@ -10,6 +10,13 @@ import { HealthModule } from './health/health.module';
 import { QueueModule } from './queue/queue.module';
 import { ApiTokensModule } from './api-tokens/api-tokens.module';
 import { CommonModule } from './common/common.module';
+import { RoutingRulesModule } from './routing-rules/routing-rules.module';
+import { DestinationsModule } from './destinations/destinations.module';
+import { DeliveriesModule } from './deliveries/deliveries.module';
+import { MediaModule } from './media/media.module';
+import { AlertsModule } from './alerts/alerts.module';
+import { AuditLogsModule } from './audit-logs/audit-logs.module';
+import { ConversationsModule } from './conversations/conversations.module';
 import { RequestIdMiddleware } from './common/request-id.middleware';
 
 @Module({
@@ -38,6 +45,13 @@ import { RequestIdMiddleware } from './common/request-id.middleware';
     TransportAccountsModule,
     HealthModule,
     QueueModule,
+    RoutingRulesModule,
+    DestinationsModule,
+    DeliveriesModule,
+    MediaModule,
+    AlertsModule,
+    AuditLogsModule,
+    ConversationsModule,
   ],
 })
 export class AppModule implements NestModule {
