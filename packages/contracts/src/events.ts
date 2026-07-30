@@ -36,3 +36,21 @@ export const EventTypeSchema = z.enum([
   'queue.backlog',
 ]);
 export type EventType = z.infer<typeof EventTypeSchema>;
+
+// Canonical event envelope (spec §15.3, CloudEvents 1.0 compatible).
+// Field names match the wire format exactly (snake_case).
+export const CanonicalEventEnvelopeSchema = z.object({
+  specversion: z.literal('1.0'),
+  id: z.string(),
+  type: z.string(),
+  source: z.string(),
+  subject: z.string().optional(),
+  time: z.string().datetime(),
+  datacontenttype: z.literal('application/json'),
+  channel: z.string().optional(),
+  account_id: z.string().nullable().optional(),
+  endpoint_id: z.string().nullable().optional(),
+  event_version: z.literal('1.0'),
+  data: z.record(z.unknown()),
+});
+export type CanonicalEventEnvelope = z.infer<typeof CanonicalEventEnvelopeSchema>;

@@ -44,7 +44,10 @@ services:
       ADMIN_BOOTSTRAP_PASSWORD: ${ADMIN_BOOTSTRAP_PASSWORD}
       SESSION_SECRET: ${SESSION_SECRET}
       COOKIE_SECRET: ${COOKIE_SECRET}
+      MEDIA_STORAGE_PATH: /data/media
       LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - umg-media-data:/data/media
     networks:
       - frontend
       - backend
@@ -71,6 +74,9 @@ services:
       REDIS_PORT: 6379
       REDIS_URL: redis://redis:6379
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      MEDIA_STORAGE_PATH: /data/media
+    volumes:
+      - umg-media-data:/data/media
     networks:
       - backend
     depends_on:
