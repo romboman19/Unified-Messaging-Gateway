@@ -68,7 +68,12 @@ def wait_for_delivery(destination_id, wanted_status, timeout=30):
 
 def cleanup_sink():
     try:
-        docker("rm", "-f", SINK_NAME)
+        subprocess.run(
+            ["docker", "rm", "-f", SINK_NAME],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
     except Exception:
         pass
 
