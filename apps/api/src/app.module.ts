@@ -5,6 +5,7 @@ import { ThrottlerModule } from '@nestjs/throttler';
 import { BullModule } from '@nestjs/bullmq';
 import { AuthModule } from './auth/auth.module';
 import { MessagesModule } from './messages/messages.module';
+import { TransportAccountsModule } from './transport-accounts/transport-accounts.module';
 import { HealthModule } from './health/health.module';
 import { QueueModule } from './queue/queue.module';
 import { ApiTokensModule } from './api-tokens/api-tokens.module';
@@ -34,6 +35,7 @@ import { RequestIdMiddleware } from './common/request-id.middleware';
     AuthModule,
     ApiTokensModule,
     MessagesModule,
+    TransportAccountsModule,
     HealthModule,
     QueueModule,
   ],
