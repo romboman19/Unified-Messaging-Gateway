@@ -1,0 +1,123 @@
+services:
+  reverse-proxy:
+    image: nginx:1.27-alpine
+    container_name: umg-reverse-proxy
+    ports:
+      - "8083:8083"
+    volumes:
+      - ./infra/docker/nginx-reverse-proxy.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      - frontend
+    depends_on:
+      - umg-web
+      - umg-api
+    restart: unless-stopped
+
+  umg-web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: web
+    container_name: umg-web
+    networks:
+      - frontend
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:80/"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  umg-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: api
+    container_name: umg-api
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+      DATABASE_URL: postgresql://umg:umg@postgres:5432/umg?schema=public
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_URL: redis://redis:6379
+      ADMIN_BOOTSTRAP_PASSWORD: ${ADMIN_BOOTSTRAP_PASSWORD}
+      SESSION_SECRET: ${SESSION_SECRET}
+      COOKIE_SECRET: ${COOKIE_SECRET}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    networks:
+      - frontend
+      - backend
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:4000/api/v1/health/live"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  umg-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: worker
+    container_name: umg-worker
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://umg:umg@postgres:5432/umg?schema=public
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_URL: redis://redis:6379
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    networks:
+      - backend
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:17-alpine
+    container_name: umg-postgres
+    environment:
+      POSTGRES_USER: umg
+      POSTGRES_PASSWORD: umg
+      POSTGRES_DB: umg
+    volumes:
+      - umg-postgres-data:/var/lib/postgresql/data
+    networks:
+      - backend
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U umg -d umg"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:8-alpine
+    container_name: umg-redis
+    command: redis-server --appendonly yes
+    volumes:
+      - umg-redis-data:/data
+    networks:
+      - backend
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+networks:
+  frontend:
+    internal: false
+  backend:
+    internal: true
+
+volumes:
+  umg-postgres-data:
+  umg-redis-data:
+  umg-media-data:

@@ -1,0 +1,256 @@
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+  output   = "../../../node_modules/.prisma/client"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model AdminUser {
+  id            String    @id @default(uuid())
+  username      String    @unique
+  passwordHash  String    @map("password_hash")
+  lastLoginAt   DateTime? @map("last_login_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+  auditLogs     AuditLog[]
+
+  @@map("admin_users")
+}
+
+model GlobalApiToken {
+  id          String    @id @default(uuid())
+  name        String    @default("default")
+  tokenHash   String    @map("token_hash")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  lastUsedAt  DateTime? @map("last_used_at")
+  revokedAt   DateTime? @map("revoked_at")
+
+  @@map("global_api_tokens")
+}
+
+enum ChannelType {
+  sms
+  whatsapp
+  signal
+  mock
+
+  @@map("channel_type")
+}
+
+enum TransportStatus {
+  active
+  inactive
+  degraded
+  disabled
+
+  @@map("transport_status")
+}
+
+model TransportAccount {
+  id              String          @id @default(uuid())
+  type            ChannelType
+  adapter         String
+  name            String
+  status          TransportStatus @default(active)
+  encryptedConfig Json            @map("encrypted_config")
+  createdAt       DateTime        @default(now()) @map("created_at")
+  updatedAt       DateTime        @updatedAt @map("updated_at")
+  endpoints       Endpoint[]
+  messages        Message[]
+
+  @@map("transport_accounts")
+}
+
+model Endpoint {
+  id            String          @id @default(uuid())
+  accountId     String          @map("account_id")
+  externalId    String?         @map("external_id")
+  phoneRaw      String?         @map("phone_raw")
+  phoneE164     String?         @map("phone_e164")
+  label         String
+  enabled       Boolean         @default(true)
+  configJson    Json            @default("{}") @map("config_json")
+  createdAt     DateTime        @default(now()) @map("created_at")
+  updatedAt     DateTime        @updatedAt @map("updated_at")
+
+  account       TransportAccount @relation(fields: [accountId], references: [id])
+  messages      Message[]
+  conversations Conversation[]
+
+  @@map("endpoints")
+}
+
+enum MessageDirection {
+  inbound
+  outbound
+
+  @@map("message_direction")
+}
+
+enum MessageStatus {
+  created
+  scheduled
+  queued
+  dispatching
+  accepted
+  sent
+  delivered
+  read
+  failed
+  cancelled
+  expired
+  unknown
+  received
+  assembling
+  incomplete
+  processed
+  forwarded
+  forward_failed
+
+  @@map("message_status")
+}
+
+enum MessageType {
+  text
+  image
+  audio
+  voice
+  video
+  document
+  sticker
+  location
+  contact
+  reaction
+  reply
+  interactive
+  poll
+  system
+  unknown
+
+  @@map("message_type")
+}
+
+model Conversation {
+  id            String      @id @default(uuid())
+  channelType   ChannelType @map("channel_type")
+  endpointId    String      @map("endpoint_id")
+  peerId        String?     @map("peer_id")
+  peerPhoneE164 String?     @map("peer_phone_e164")
+  lastMessageAt DateTime?   @map("last_message_at")
+  createdAt     DateTime    @default(now()) @map("created_at")
+  updatedAt     DateTime    @updatedAt @map("updated_at")
+
+  endpoint Endpoint @relation(fields: [endpointId], references: [id])
+  messages Message[]
+
+  @@map("conversations")
+}
+
+model Message {
+  id              String           @id @default(uuid())
+  direction       MessageDirection
+  channelType     ChannelType      @map("channel_type")
+  accountId       String           @map("account_id")
+  endpointId      String           @map("endpoint_id")
+  conversationId  String?          @map("conversation_id")
+  externalId      String?          @map("external_id")
+  messageType     MessageType      @map("message_type")
+  status          MessageStatus    @default(created)
+  fromJson        Json             @map("from_json")
+  toJson          Json             @map("to_json")
+  contentJson     Json             @map("content_json")
+  metadataJson    Json             @default("{}") @map("metadata_json")
+  rawPayload      Json             @map("raw_payload")
+  scheduledAt     DateTime?        @map("scheduled_at")
+  createdAt       DateTime         @default(now()) @map("created_at")
+  updatedAt       DateTime         @updatedAt @map("updated_at")
+
+  account       TransportAccount   @relation(fields: [accountId], references: [id])
+  endpoint      Endpoint           @relation(fields: [endpointId], references: [id])
+  conversation  Conversation?      @relation(fields: [conversationId], references: [id])
+  attempts      MessageAttempt[]
+  statusHistory MessageStatusHistory[]
+
+  @@index([endpointId, status, createdAt])
+  @@index([createdAt])
+  @@map("messages")
+}
+
+model MessageAttempt {
+  id          String    @id @default(uuid())
+  messageId   String    @map("message_id")
+  attemptNo   Int       @map("attempt_no")
+  startedAt   DateTime  @default(now()) @map("started_at")
+  finishedAt  DateTime? @map("finished_at")
+  result      String
+  errorJson   Json?     @map("error_json")
+
+  message Message @relation(fields: [messageId], references: [id])
+
+  @@index([messageId])
+  @@map("message_attempts")
+}
+
+model MessageStatusHistory {
+  id        String        @id @default(uuid())
+  messageId String        @map("message_id")
+  status    MessageStatus
+  source    String
+  payload   Json
+  createdAt DateTime      @default(now()) @map("created_at")
+
+  message Message @relation(fields: [messageId], references: [id])
+
+  @@index([messageId, createdAt])
+  @@map("message_status_history")
+}
+
+model EventOutbox {
+  id          String    @id @default(uuid())
+  eventType   String    @map("event_type")
+  aggregateId String    @map("aggregate_id")
+  payload     Json
+  publishedAt DateTime? @map("published_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  @@index([publishedAt])
+  @@map("event_outbox")
+}
+
+model AuditLog {
+  id          String    @id @default(uuid())
+  actorId     String?   @map("actor_id")
+  action      String
+  entityType  String    @map("entity_type")
+  entityId    String    @map("entity_id")
+  beforeJson  Json?     @map("before_json")
+  afterJson   Json?     @map("after_json")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  actor AdminUser? @relation(fields: [actorId], references: [id])
+
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+model IdempotencyKey {
+  key         String    @id
+  requestHash String    @map("request_hash")
+  responseRef String    @map("response_ref")
+  expiresAt   DateTime  @map("expires_at")
+
+  @@index([expiresAt])
+  @@map("idempotency_keys")
+}
+
+model SystemSetting {
+  key       String @id
+  valueJson Json   @map("value_json")
+  encrypted Boolean @default(false)
+
+  @@map("system_settings")
+}

@@ -1,0 +1,51 @@
+# Secrets — never commit real credentials
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+docker-compose.override.yml
+
+# Runtime data
+data/
+media/
+backups/
+*.tar.gz
+*.tgz
+*.zip
+
+# Node / build
+node_modules/
+dist/
+build/
+.next/
+*.log
+logs/
+coverage/
+*.tsbuildinfo
+
+# Prisma engine binaries downloaded at runtime
+node_modules/.prisma/client/*.node
+node_modules/.prisma/client/*
+prisma/migrations/*/migration_engine*
+
+# Temporary / generated helper scripts from setup
+umg_*.py
+*.pyc
+__pycache__/
+*.pyo
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Test artifacts
+test-results/
+playwright-report/
+screenshots/
+.vitest/
