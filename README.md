@@ -1,6 +1,6 @@
 # Unified Messaging Gateway (UMG)
 
-Внутрішній єдиний шлюз для SMS, WhatsApp та Signal. Milestone 0 — робочий скелет на NestJS + React, розгорнутий через Docker Compose.
+Внутрішній єдиний шлюз для SMS, WhatsApp та Signal. NestJS + React, розгорнутий через Docker Compose. Milestone 0 (скелет: авторизація, канали, повідомлення) та Milestone 1 (маршрутизація, вебхуки, вкладення, алерти) виконані.
 
 ## Швидкий старт
 
@@ -67,6 +67,25 @@ export UMG_ADMIN_PASSWORD=$(grep ADMIN_BOOTSTRAP_PASSWORD .env | cut -d= -f2)
 node tests/e2e-channels.js ./screenshots-channels
 ```
 
+## Документація
+
+- **API**
+  - [docs/api/openapi.yaml](docs/api/openapi.yaml) — OpenAPI 3.0: живі ендпоінти + заплановані (позначені `[Planned]`).
+- **Архітектура**
+  - [docs/architecture/overview.md](docs/architecture/overview.md) — модульний моноліт + worker, компоненти, ADR, потоки даних.
+  - [docs/architecture/adapters.md](docs/architecture/adapters.md) — контракт адаптерів: mock (поточний), GoIP/DBLtek, UnoAPI, Signal.
+  - [docs/architecture/data-model.md](docs/architecture/data-model.md) — схема PostgreSQL/Prisma + заплановані сутності.
+  - [docs/architecture/security.md](docs/architecture/security.md) — модель безпеки (доступ, секрети, ізоляція, SSRF, аудит).
+- **Експлуатація**
+  - [docs/operator-guide/uk.md](docs/operator-guide/uk.md) — посібник оператора (українською): встановлення, перший вхід, токени, канали, маршрутизація, типові проблеми.
+  - [docs/runbooks/backup-restore.md](docs/runbooks/backup-restore.md) — резервне копіювання та відновлення.
+  - [docs/runbooks/channel-down.md](docs/runbooks/channel-down.md) — канал недоступний/деградований.
+  - [docs/runbooks/queue-recovery.md](docs/runbooks/queue-recovery.md) — відновлення черг після інциденту з Redis.
+  - [docs/runbooks/goip-rollback.md](docs/runbooks/goip-rollback.md), [signal-relink.md](docs/runbooks/signal-relink.md), [whatsapp-reconnect.md](docs/runbooks/whatsapp-reconnect.md) — заглушки, будуть заповнені в Milestone 2/4/5.
+- **Ліцензії**: [docs/licensing/third-party.md](docs/licensing/third-party.md) — UnoAPI (GPL-3.0), signal-cli (MIT/власні умови), DBLtek (обмеження редистрибуції).
+- **Історія змін**: [CHANGELOG.md](CHANGELOG.md).
+- **Повне технічне завдання**: [docs/ТЗ.md](docs/ТЗ.md).
+
 ## Важливі файли
 
 - `docs/ТЗ.md` — повне технічне завдання.
@@ -79,4 +98,12 @@ node tests/e2e-channels.js ./screenshots-channels
 
 ## Наступні кроки
 
-Реалізувати реальні транспортні адаптери (GoIP/SMS, WhatsApp, Signal) поверх існуючого API акаунтів та endpoint.
+Milestone 1 завершено: рушій маршрутизації, призначення вебхуків (webhook/email/telegram/internal_log) із HMAC-підписом, доставки з DLQ та ручним replay, вкладення з підписаними URL і ретенцією, алерти, нові сторінки UI, повний набір документації.
+
+Далі за [docs/ТЗ.md](docs/ТЗ.md):
+
+- **Milestone 2** — адаптер GoIP/DBLtek SMS Server (sidecar-контейнер, vendor API, rollback runbook).
+- **Milestone 4** — адаптер Signal (signal-cli-rest-api, relink runbook).
+- **Milestone 5** — адаптер WhatsApp через UnoAPI (reconnect runbook).
+
+Деталі контрактів адаптерів: [docs/architecture/adapters.md](docs/architecture/adapters.md).
