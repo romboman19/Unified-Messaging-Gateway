@@ -3,5 +3,7 @@
 @tailwind utilities;
 
 body {
-  @apply bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100;
+  /* Milestone 1 uses a single light theme. Full dark-mode support will be
+     implemented across all components in a later milestone. */
+  @apply bg-slate-50 text-slate-900;
 }

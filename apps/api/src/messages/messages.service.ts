@@ -55,17 +55,21 @@ export class MessagesService {
   }
 
   async send(dto: SendMessageDto, idempotencyKey?: string, requestId = 'unknown'): Promise<SendMessageResponse> {
-    if (dto.channel === 'mock') {
-      const account = await this.prisma.transportAccount.findFirst({
-        where: { adapter: 'mock' },
-        include: { endpoints: { where: { enabled: true } } },
-      });
-      if (!account || account.endpoints.length === 0) {
-        throw new UnprocessableEntityException('Mock endpoint недоступний.');
-      }
-      dto.accountId = account.id;
-      dto.endpointId = account.endpoints[0].id;
+    if (dto.channel !== 'mock') {
+      throw new UnprocessableEntityException(
+        `Реальний транспорт для каналу "${dto.channel}" ще не реалізований. Milestone 1 підтримує лише mock.`,
+      );
     }
+
+    const account = await this.prisma.transportAccount.findFirst({
+      where: { adapter: 'mock' },
+      include: { endpoints: { where: { enabled: true } } },
+    });
+    if (!account || account.endpoints.length === 0) {
+      throw new UnprocessableEntityException('Mock endpoint недоступний.');
+    }
+    dto.accountId = account.id;
+    dto.endpointId = account.endpoints[0].id;
 
     const requestHash = this.hashRequest(dto);
     if (idempotencyKey) {

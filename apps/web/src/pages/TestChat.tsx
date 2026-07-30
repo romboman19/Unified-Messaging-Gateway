@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { MessageSquare, Send } from 'lucide-react';
+import { MessageSquare, Send, AlertCircle } from 'lucide-react';
 import { api } from '../hooks/useAuth';
 import { Conversation, ListResponse, Message, TransportAccount } from '../lib/types';
 import { Badge, CHANNEL_LABEL, MESSAGE_STATUS_LABEL } from '../components/ui';
@@ -70,10 +70,12 @@ export default function TestChatPage() {
     if (selected?.peerPhoneE164 && !to) setTo(selected.peerPhoneE164);
   }, [selectedId]);
 
-  const channelEndpoints =
-    accounts.data
-      ?.filter((a) => a.type === channel)
-      .flatMap((a) => a.endpoints.map((e) => ({ ...e, account: a }))) ?? [];
+  const activeAccounts = accounts.data?.filter((a) => a.status === 'active') ?? [];
+  const channelAccounts = activeAccounts.filter((a) => a.type === channel);
+  const channelEndpoints = channelAccounts.flatMap((a) =>
+    a.endpoints.map((e) => ({ ...e, account: a })),
+  );
+  const hasRealAdapter = channel !== 'mock' && channelAccounts.length > 0;
 
   return (
     <div>
@@ -81,6 +83,17 @@ export default function TestChatPage() {
       <p className="mt-2 text-slate-500">
         Діагностика: перевірка відправки/отримання, статусів і медіа.
       </p>
+
+      {hasRealAdapter && (
+        <div className="mb-4 mt-4 flex items-start gap-3 rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800">
+          <AlertCircle size={18} className="mt-0.5 shrink-0" />
+          <div>
+            Канал {channel} має активний акаунт, але реальний адаптер ще не реалізований.
+            Відправка фактично пройде через заглушку (mock). Справжнє підключення з QR-кодом
+            буде реалізовано в наступних milestone'ах.
+          </div>
+        </div>
+      )}
 
       <div className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-3">
         <div className="rounded-lg bg-white shadow lg:col-span-1">
