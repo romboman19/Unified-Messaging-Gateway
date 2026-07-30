@@ -11,9 +11,9 @@
 - На сервері `gh` авторизовано як `romboman19` — push на GitHub робиться **з сервера** (локально токена нема).
 - Локальна копія репо (машина розробника Windows): `C:\Users\DELL\rakamakafo\umg`.
 
-## Що ЗРОБЛЕНО (запушено на GitHub, гілка main)
+## Що ЗРОБЛЕНО (запушено на GitHub, гілка main, задеплойовано на 192.168.10.11:8083)
 
-Milestone 1 «Core messaging» з ТЗ §37. Коміти:
+Milestone 1 «Core messaging» з ТЗ §37 + UI + розширені smoke-тести. Коміти:
 
 1. `b4a8e5d feat(db,api)` — схема БД + API:
    - Prisma: RoutingRule, RuleDestinationLink, WebhookDestination (webhook/email/telegram/internal_log),
@@ -24,76 +24,24 @@ Milestone 1 «Core messaging» з ТЗ §37. Коміти:
      media upload/signed-url/delete, alerts, audit-logs, events, conversations,
      messages: retry/cancel/filters/idempotency-409/attachments/`ui-send` (session), SessionOrTokenGuard, EventEmitter.
 2. `495eb09 feat(worker)` — EventsService (outbox §28), RoutingService (§15.1 + field selector + шаблони без eval),
-   WebhookDeliverProcessor (HMAC-SHA256 §15.4: `X-UMG-Signature: sha256=${HMAC(secret, timestamp + "." + body)}`,
-   retry [60,300,900,3600]c, 4xx=permanent, DLQ+alert після 5 спроб), ScheduledSendScheduler
+   WebhookDeliverProcessor (HMAC-SHA256 §15.4, retry [60,300,900,3600]c, 4xx=permanent, DLQ+alert після 5 спроб), ScheduledSendScheduler
    (**багфікс: scheduled-повідомлення раніше ніколи не відправлялись**), ReconciliationScheduler §28,
    MediaRetentionScheduler (60 днів, `media.deleted`), message.sent/failed events, final-failure alert.
-3. `8eff2ad docs` — повний набір документації за ТЗ §41: OpenAPI, architecture (4 файли), operator-guide (укр),
-   runbooks, licensing, CHANGELOG, оновлений README.
+3. `8eff2ad docs` — повний набір документації за ТЗ §41.
+4. `00b7f9f feat(web)` — Milestone 1 UI: Layout+навігація, Dashboard, Messages, TestChat, Routing, Deliveries, Alerts, ApiTokens, Logs. TestChat використовує `POST /api/v1/messages/ui-send` (session). Всі рядки — українською.
+5. `7525955 feat(tests)` — розширено `tests/smoke-test.py`: webhook sink, routing rule, delivered/failed (4xx permanent), destination test, delivery replay, media upload/download/signed-url, events/audit-logs.
+6. `a9e5090 fix(api,gitignore)` — `.gitignore` ігнорував `apps/api/src/media/` через правило `media/`; виправлено на `/media/` (лише корінь репо), додано відсутні файли модуля медіа.
+7. `37b8728 fix(tests)` — прибрано stderr від `docker rm -f` у cleanup smoke-тесту.
 
-Локально всі збірки зелені: `npm run build --workspace=packages/database --workspace=apps/api --workspace=apps/worker` — 0 помилок.
+Локально та на сервері всі збірки зелені. Smoke-тести на сервері проходять (`python3 tests/smoke-test.py` після `source /srv/umg/.env`).
+
+**Одноразовий фікс міграції вже виконано**: контрольна сума `20260729204843_init` оновлена в `_prisma_migrations` перед деплоєм; деталі в `docs/runbooks/migration-checksum-fix.md`.
 
 ## НА ЧОМУ ЗУПИНИЛИСЬ
 
-- **UI (apps/web) — у роботі, НЕ закомічено.** Тло-агент будує сторінки: Layout+навігація, Messages, TestChat,
-  Routing, Deliveries, Alerts, ApiTokens, Logs, оновлений Dashboard. Файли в робочому дереві локального репо
-  (`apps/web/src/...` — modified/untracked). Збірку web ще не верифіковано.
-- **Smoke-тести не розширено** (поточний `tests/smoke-test.py` покриває лише M0).
-- **Передеплой на сервері не виконано** — на сервері досі старий код (cb4ae21).
 - Milestones 2–6 (GoIP, Signal, WhatsApp, hardening) НЕ розпочато — потребують реального заліза/креденшелів
   (ТЗ §36 Phase 0 discovery: IP GoIP SMS Server, логін/пароль, line IDs, UnoAPI, signal-cli тощо).
-
-## ЯК ПРИЙНЯТИ РОБОТУ (чеклист для наступного агента)
-
-### 1. Доробити й закомітити UI
-```bash
-cd C:\Users\DELL\rakamakafo\umg
-npm install
-npm run build --workspace=apps/web   # має бути 0 помилок
-git add apps/web && git commit -m "feat(web): Milestone 1 UI pages..."
-```
-Перевірити: композер TestChat використовує `POST /api/v1/messages/ui-send` (session). Всі рядки — українською.
-
-### 2. Розширити tests/smoke-test.py (запускається НА СЕРВЕРІ)
-Нові сценарії (після існуючих 7 кроків):
-- підняти приймач вебхуків: `docker run --rm -d --network umg_backend --name umg-hook-sink hashicorp/http-echo -listen=:5678 -text=ok`
-- створити destination (webhook, url=http://umg-hook-sink:5678/, secret=smoke-secret) і routing rule
-  з eventTypes=[message.queued,message.sent,message.delivered] → відправити mock → зачекати →
-  `GET /deliveries?destinationId=` має показати `delivered`
-- destination з url=http://umg-api:4000/no-such-route → delivery стає `failed` (4xx permanent) за ~15с
-- `POST /destinations/:id/test` → delivered
-- `POST /deliveries/:id/replay` → новий delivery id, той самий eventId
-- media: upload (JSON base64) → GET назад побайтово → signed-url працює
-- `GET /events` містить message.queued; `GET /audit-logs` не порожній
-- прибрати sink-контейнер у finally
-
-### 3. Запушити на GitHub (з локальної машини через сервер)
-```bash
-cd C:\Users\DELL\rakamakafo\umg
-git bundle create "$TMP/umg.bundle" origin/main..main        # або останній спільний коміт..main
-scp "$TMP/umg.bundle" root@192.168.10.11:/tmp/umg.bundle
-ssh root@192.168.10.11 'cd /srv/umg && git fetch /tmp/umg.bundle main && git merge --ff-only FETCH_HEAD && git push origin main'
-```
-
-### 4. Передеплой на сервері — КРИТИЧНО: спочатку фікс checksum міграції!
-Baseline-міграцію відтворено; її SHA-256 відрізняється від запису в `_prisma_migrations`. Без фіксу
-`prisma migrate deploy` у entrypoint ВПАДЕ і API не стартує:
-```bash
-ssh root@192.168.10.11
-cd /srv/umg && git pull --ff-only
-CS=$(sha256sum packages/database/prisma/migrations/20260729204843_init/migration.sql | cut -d' ' -f1)
-docker exec umg-postgres psql -U umg -d umg -c \
-  "UPDATE _prisma_migrations SET checksum='$CS' WHERE migration_name='20260729204843_init';"
-docker compose up -d --build
-docker ps   # усі 6 контейнерів Up (api/worker/web healthy)
-export ADMIN_BOOTSTRAP_PASSWORD=$(grep ADMIN_BOOTSTRAP_PASSWORD .env | cut -d= -f2)
-python3 tests/smoke-test.py
-```
-Після цього видалити цей розділ з HANDOFF і доповнити docs/runbooks (крок одноразовий).
-
-### 5. Перевірка UI в браузері
-Playwright MCP або `tests/e2e-channels.js`: логін admin → пройти по сторінках навігації →
-створити destination + rule через UI → TestChat відправка → Deliveries показує delivered.
+- Playwright e2e UI-тест не автоматизовано; поточна перевірка UI — ручна/браузерна.
 
 ## Відомі технічні рішення/обмеження
 
