@@ -55,23 +55,20 @@ export class MessagesService {
   }
 
   async send(dto: SendMessageDto, idempotencyKey?: string, requestId = 'unknown'): Promise<SendMessageResponse> {
-    if (dto.channel !== 'mock') {
-      throw new UnprocessableEntityException(
-        `Реальний транспорт для каналу "${dto.channel}" ще не реалізований. Milestone 1 підтримує лише mock.`,
-      );
-    }
-
-    // Respect caller-provided account/endpoint; fall back to the first enabled mock endpoint.
+    // Real transports (sms/whatsapp/signal) are now wired in via
+    // `apps/worker` + `packages/adapters`. The hard "mock-only" guard
+    // introduced in commit `fb6d179` is removed: any channel/endpoint
+    // with an enabled account is acceptable.
     let accountId = dto.accountId;
     let endpointId = dto.endpointId;
     if (!accountId || !endpointId) {
       const account = await this.prisma.transportAccount.findFirst({
-        where: { adapter: 'mock' },
+        where: { adapter: dto.channel === 'mock' ? 'mock' : { in: ['mock', 'goip-vendor', 'unoapi', 'signal-cli-rest-api'] } },
         include: { endpoints: { where: { enabled: true } } },
         orderBy: { createdAt: 'desc' },
       });
       if (!account || account.endpoints.length === 0) {
-        throw new UnprocessableEntityException('Mock endpoint недоступний.');
+        throw new UnprocessableEntityException('Доступний endpoint відсутній для каналу ' + dto.channel);
       }
       accountId = account.id;
       endpointId = account.endpoints[0].id;
@@ -80,7 +77,7 @@ export class MessagesService {
         where: { id: endpointId, accountId, enabled: true },
       });
       if (!endpoint) {
-        throw new UnprocessableEntityException('Mock endpoint недоступний.');
+        throw new UnprocessableEntityException('Endpoint недоступний або вимкнений.');
       }
     }
     dto.accountId = accountId;

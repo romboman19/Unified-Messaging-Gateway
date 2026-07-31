@@ -1,16 +1,19 @@
 import { Injectable } from '@nestjs/common';
-import { TransportAdapter, SendResult } from './adapter.interface';
-import { randomUUID } from 'crypto';
+import { TransportAdapter, SendResultLegacy } from './adapter.interface';
+import { AdaptersRegistry } from './adapters.registry';
 
 @Injectable()
 export class MockAdapter implements TransportAdapter {
-  async send(_message: unknown): Promise<SendResult> {
-    // Simulate short network delay and deterministic success.
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    return {
-      externalId: `mock-${randomUUID()}`,
-      status: 'sent',
-      raw: { provider: 'mock', result: 'ok' },
-    };
+  constructor(private readonly registry: AdaptersRegistry) {}
+
+  async send(_message: unknown): Promise<SendResultLegacy> {
+    return this.registry.get('mock').send({} as any, {} as any, { id: 'mock', adapter: 'mock', configJson: {} } as any).then((r) => {
+      const status = r.accepted ? 'sent' : 'failed';
+      return {
+        externalId: r.externalId ?? undefined,
+        status: status as SendResultLegacy['status'],
+        raw: r.rawResponse,
+      } as SendResultLegacy;
+    });
   }
 }
