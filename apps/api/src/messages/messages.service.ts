@@ -23,36 +23,7 @@ export class MessagesService {
     private readonly queue: QueueService,
     private readonly audit: AuditService,
     private readonly events: EventEmitterService,
-  ) {
-    void this.ensureMockChannel();
-  }
-
-  async ensureMockChannel(): Promise<void> {
-    const existing = await this.prisma.transportAccount.findFirst({
-      where: { adapter: 'mock' },
-      include: { endpoints: true },
-    });
-    if (existing) return;
-    const account = await this.prisma.transportAccount.create({
-      data: {
-        type: ChannelType.mock,
-        adapter: 'mock',
-        name: 'Mock channel',
-        status: 'active',
-        encryptedConfig: {},
-        endpoints: {
-          create: {
-            label: 'Mock endpoint',
-            externalId: 'mock-1',
-            enabled: true,
-            configJson: {},
-          },
-        },
-      },
-      include: { endpoints: true },
-    });
-    await this.audit.log('system', 'transport_account.created', 'transport_account', account.id, {}, { id: account.id, name: account.name });
-  }
+  ) {}
 
   async send(dto: SendMessageDto, idempotencyKey?: string, requestId = 'unknown'): Promise<SendMessageResponse> {
     // Real transports (sms/whatsapp/signal) are now wired in via
