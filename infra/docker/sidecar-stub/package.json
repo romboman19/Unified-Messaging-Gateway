@@ -1,0 +1,8 @@
+{
+  "name": "@umg/sidecar-stub",
+  "version": "0.1.0",
+  "private": true,
+  "description": "In-memory stubs of DBLtek / UnoAPI / signal-cli-rest-api for dev and CI.",
+  "type": "module",
+  "main": "server.mjs"
+}

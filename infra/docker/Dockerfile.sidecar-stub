@@ -1,0 +1,35 @@
+# Sidecar stub for UMG transport adapters (TZ §21/§23/§24).
+#
+# This single image provides the lightweight HTTP behaviour the UMG
+# adapters call into for each of the three vendors. Three listeners in
+# one process (vendor selected by host port mapping + per-vendor path
+# prefixes). All callers go through the same image but get different
+# host:port pairs in docker-compose.
+#
+# Production must replace this image with:
+#   • clairton/unoapi-cloud       (WhatsApp, GPL-3.0, see docs/licensing)
+#   • bbernhard/signal-cli-rest-api (Signal)
+#   • The DBLtek PHP/MySQL v1.30.1 archive (TZ §21 ADR-003; archive
+#     SHA-256-pinned locally, never committed).
+#
+# The stub keeps an in-memory queue of received messages and an
+# in-memory message-id ↔ status registry, so e2e tests can build full
+# flows without vendor hardware.
+
+FROM node:24-alpine
+
+WORKDIR /app
+
+# Everything is pre-baked into the image: package.json + server.mjs.
+# The compose file mounts the same files for fast iteration
+# (`docker compose restart umg-signal-cli` after a code change without
+# rebuilding the image).
+
+COPY sidecar-stub/package.json ./
+RUN npm install --omit=dev --no-audit --no-fund --no-progress express
+
+COPY sidecar-stub/server.mjs ./
+
+EXPOSE 8080 9876
+
+CMD ["node", "server.mjs"]

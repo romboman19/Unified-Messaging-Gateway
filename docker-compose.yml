@@ -46,11 +46,18 @@ services:
       COOKIE_SECRET: ${COOKIE_SECRET}
       MEDIA_STORAGE_PATH: /data/media
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      DBSMS_BASE_URL: ${DBSMS_BASE_URL:-http://dbsms-vendor:8080}
+      DBSMS_USERNAME: ${DBSMS_USERNAME:-admin}
+      DBSMS_PASSWORD: ${DBSMS_PASSWORD:-change-me}
+      UNOAPI_BASE_URL: ${UNOAPI_BASE_URL:-http://unoapi:9876}
+      UNOAPI_API_KEY: ${UNOAPI_API_KEY:-change-me}
+      SIGNAL_BASE_URL: ${SIGNAL_BASE_URL:-http://signal-cli:8080}
     volumes:
       - umg-media-data:/data/media
     networks:
       - frontend
       - backend
+      - transports
     depends_on:
       - postgres
       - redis
@@ -75,10 +82,17 @@ services:
       REDIS_URL: redis://redis:6379
       LOG_LEVEL: ${LOG_LEVEL:-info}
       MEDIA_STORAGE_PATH: /data/media
+      DBSMS_BASE_URL: ${DBSMS_BASE_URL:-http://dbsms-vendor:8080}
+      DBSMS_USERNAME: ${DBSMS_USERNAME:-admin}
+      DBSMS_PASSWORD: ${DBSMS_PASSWORD:-change-me}
+      UNOAPI_BASE_URL: ${UNOAPI_BASE_URL:-http://unoapi:9876}
+      UNOAPI_API_KEY: ${UNOAPI_API_KEY:-change-me}
+      SIGNAL_BASE_URL: ${SIGNAL_BASE_URL:-http://signal-cli:8080}
     volumes:
       - umg-media-data:/data/media
     networks:
       - backend
+      - transports
     depends_on:
       - postgres
       - redis
@@ -117,10 +131,75 @@ services:
       timeout: 3s
       retries: 5
 
+  # ─────────────────── Transport sidecars (TZ §21/§23/§24) ──────────────
+  # By default Compose brings up the in-memory stub image at
+  # `infra/docker/Dockerfile.sidecar-stub`. Production deployments swap
+  # these for the real vendor images:
+  #   - bbernhard/signal-cli-rest-api (TZ §24 — Signal)
+  #   - clairton/unoapi-cloud        (TZ §23 — WhatsApp, GPL-3.0)
+  #   - DBLtek GoIP SMS Server v1.30.1 sidecar (TZ §21 — vendor archive,
+  #     SHA-256-pinned locally, never committed).
+  # Network `transports` is `internal: true` so the vendor containers
+  # have no LAN/internet egress (TZ §21, ADR-002).
+
+  dbsms-vendor:
+    build:
+      context: ./infra/docker
+      dockerfile: Dockerfile.sidecar-stub
+    container_name: umg-dbsms-vendor
+    environment:
+      STUB_VENDOR: dbsms
+      STUB_PORT: "8080"
+    networks:
+      - transports
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/health >/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  unoapi:
+    build:
+      context: ./infra/docker
+      dockerfile: Dockerfile.sidecar-stub
+    container_name: umg-unoapi
+    environment:
+      STUB_VENDOR: unoapi
+      STUB_PORT: "9876"
+    networks:
+      - transports
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9876/ping >/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  signal-cli:
+    build:
+      context: ./infra/docker
+      dockerfile: Dockerfile.sidecar-stub
+    container_name: umg-signal-cli
+    environment:
+      SIGNAL_CLI_MODE: ${SIGNAL_CLI_MODE:-json-rpc}
+      STUB_VENDOR: signal
+      STUB_PORT: "8080"
+    networks:
+      - transports
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/v1/health >/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
 networks:
   frontend:
     internal: false
   backend:
+    internal: true
+  transports:
     internal: true
 
 volumes:

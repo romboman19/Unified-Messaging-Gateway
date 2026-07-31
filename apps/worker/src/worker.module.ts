@@ -5,6 +5,7 @@ import { ScheduleModule } from '@nestjs/schedule';
 import { PrismaClient } from '@umg/database';
 import { MessageSendProcessor } from './processors/message-send.processor';
 import { WebhookDeliverProcessor } from './processors/webhook-deliver.processor';
+import { AdaptersRegistry, AdaptersFacade } from './adapters/adapters.registry';
 import { MockAdapter } from './adapters/mock.adapter';
 import { EventsService } from './events/events.service';
 import { RoutingService } from './routing/routing.service';
@@ -36,6 +37,11 @@ import { ReconciliationScheduler } from './schedulers/reconciliation.scheduler';
     EventsService,
     RoutingService,
     AlertsService,
+    // Channel adapter infrastructure — registry holds every built-in adapter
+    // (mock, goip-vendor, unoapi, signal-cli-rest-api). See
+    // `packages/channel-sdk/src/registry.ts`.
+    AdaptersRegistry,
+    AdaptersFacade,
     MockAdapter,
     { provide: 'PRISMA', useValue: new PrismaClient() },
   ],

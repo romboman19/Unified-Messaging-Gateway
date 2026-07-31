@@ -8,6 +8,8 @@ COPY apps/worker/package.json ./apps/worker/
 COPY apps/web/package.json ./apps/web/
 COPY packages/contracts/package.json ./packages/contracts/
 COPY packages/database/package.json ./packages/database/
+COPY packages/channel-sdk/package.json ./packages/channel-sdk/
+COPY packages/adapters/package.json ./packages/adapters/
 RUN npm install
 
 FROM base AS build
@@ -24,7 +26,7 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/package.json ./package.json
 COPY --from=build /app/apps ./apps
 COPY --from=build /app/packages ./packages
-COPY infra/docker/entrypoint-api.sh /entrypoint.sh
+COPY --from=build /app/infra/docker/entrypoint-api.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 EXPOSE 4000
 ENTRYPOINT ["/entrypoint.sh"]
@@ -38,7 +40,7 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/package.json ./package.json
 COPY --from=build /app/apps ./apps
 COPY --from=build /app/packages ./packages
-COPY infra/docker/entrypoint-worker.sh /entrypoint.sh
+COPY --from=build /app/infra/docker/entrypoint-worker.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["node", "apps/worker/dist/main.js"]
