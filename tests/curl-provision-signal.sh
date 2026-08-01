@@ -24,13 +24,16 @@ if [[ -z "${BASE:-}" ]]; then
 fi
 
 STUB_BASE="${STUB_BASE:-http://localhost:8080}"
+# When the stub isn't host-published (default in docker-compose), reach the
+# signal-cli container directly. We assume the container name is `umg-signal-cli`.
+STUB_CONTAINER="${STUB_CONTAINER:-umg-signal-cli}"
 
 echo "── 1. Login ──"
 COOKIE=$(mktemp)
 trap 'rm -f "$COOKIE"' EXIT
 curl -sS -c "$COOKIE" -X POST "$BASE/api/v1/auth/login" \
   -H 'content-type: application/json' \
-  -d "{\"password\":\"${ADMIN_BOOTSTRAP_PASSWORD:?}\"}" > /dev/null
+  -d "{\"username\":\"admin\",\"password\":\"${ADMIN_BOOTSTRAP_PASSWORD:?}\"}" > /dev/null
 
 echo "── 2. Find Signal transport account ──"
 ACCT_ID=$(curl -sS -b "$COOKIE" "$BASE/api/v1/transport-accounts" \
@@ -54,9 +57,14 @@ fi
 echo "  OK — $URI"
 
 echo "── 5. Simulate phone scan via dev-only stub hook ──"
-curl -sS -X POST "$STUB_BASE/v1/_stub/link" \
-  -H 'content-type: application/json' \
-  -d "{\"deviceName\":\"$DEVICE_NAME\"}"
+if curl -sS -m 2 -o /dev/null "$STUB_BASE/v1/health" 2>/dev/null; then
+  curl -sS -X POST "$STUB_BASE/v1/_stub/link" \
+    -H 'content-type: application/json' \
+    -d "{\"deviceName\":\"$DEVICE_NAME\"}"
+else
+  # Stub isn't host-published; reach the docker container directly.
+  docker exec "$STUB_CONTAINER" node -e "fetch('http://127.0.0.1:8080/v1/_stub/link',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({deviceName:'$DEVICE_NAME'})}).then(r=>r.text()).then(console.log).catch(e=>{console.error(e);process.exit(1)})"
+fi
 echo
 
 echo "── 6. Poll until linked ──"
