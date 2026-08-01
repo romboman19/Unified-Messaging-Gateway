@@ -8,6 +8,15 @@ import type {
   EndpointConfig,
   SendResult,
 } from './types.js';
+import type {
+  ProvisionedAccount,
+  ProvisionQrInput,
+  ProvisionQrResult,
+  ProvisionSmsInput,
+  ProvisionSmsResult,
+  VerifyCodeInput,
+  VerifyCodeResult,
+} from './provisioning.js';
 
 /**
  * Contract every transport adapter implements.
@@ -51,4 +60,24 @@ export interface ChannelAdapter {
 
   /** Optional: tear down. */
   shutdown?(account: AccountConfig): Promise<void>;
+
+  // ─── Provisioning (TZ §1038) — optional, only QR/SMS-capable adapters ──
+  // Adapters that cannot mint runtime identities (DBLtek GoIP — physical
+  // SIMs pre-installed) MUST NOT implement these; they advertise
+  // `capabilities.features.provisioning === 'none'` instead.
+
+  /** Start a QR-linked-device wizard. Returns a URI to render + a session id. */
+  provisionQr?(account: AccountConfig, input: ProvisionQrInput): Promise<ProvisionQrResult>;
+
+  /** Start an SMS / voice verification flow. */
+  provisionSms?(account: AccountConfig, input: ProvisionSmsInput): Promise<ProvisionSmsResult>;
+
+  /** Submit the verification code the admin received. */
+  verifyCode?(account: AccountConfig, input: VerifyCodeInput): Promise<VerifyCodeResult>;
+
+  /** List devices/accounts already linked on the sidecar (reconcile orphans). */
+  listProvisionedAccounts?(account: AccountConfig): Promise<ProvisionedAccount[]>;
+
+  /** Detach / logout a device from the sidecar. */
+  unlink?(account: AccountConfig, externalId: string): Promise<void>;
 }
