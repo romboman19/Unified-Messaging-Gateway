@@ -14,7 +14,7 @@ RUN npm install
 
 FROM base AS build
 COPY . .
-RUN npm run build --workspace=packages/contracts --workspace=packages/database
+RUN npm run build --workspace=packages/contracts --workspace=packages/database --workspace=packages/channel-sdk --workspace=packages/adapters
 RUN npx prisma generate --schema packages/database/prisma/schema.prisma
 RUN npm run build --workspace=apps/api --workspace=apps/worker
 
