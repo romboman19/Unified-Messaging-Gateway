@@ -1,24 +1,20 @@
 import { useEffect, useState } from 'react';
 import { api } from '../hooks/useAuth';
-import { Trash2, Plus, Radio, Power, PowerOff } from 'lucide-react';
-
-interface Endpoint {
-  id: string;
-  label: string;
-  externalId: string | null;
-  phoneE164: string | null;
-  phoneRaw: string | null;
-  enabled: boolean;
-}
-
-interface Account {
-  id: string;
-  name: string;
-  type: 'sms' | 'whatsapp' | 'signal';
-  adapter: string;
-  status: string;
-  endpoints: Endpoint[];
-}
+import {
+  Trash2,
+  Plus,
+  Radio,
+  Power,
+  PowerOff,
+  Link2,
+  Unlink,
+} from 'lucide-react';
+import type {
+  Endpoint,
+  RegistrationState,
+  TransportAccount,
+} from '../lib/types';
+import { ProvisioningWizard } from '../components/ProvisioningWizard';
 
 type EndpointDraft = {
   label: string;
@@ -26,7 +22,7 @@ type EndpointDraft = {
   phone: string;
 };
 
-const typeLabel: Record<Account['type'], string> = {
+const typeLabel: Record<TransportAccount['type'], string> = {
   sms: 'SMS / DBLtek GoIP',
   whatsapp: 'WhatsApp / UnoAPI',
   signal: 'Signal / signal-cli-rest-api',
@@ -34,15 +30,28 @@ const typeLabel: Record<Account['type'], string> = {
 
 const emptyDraft = (): EndpointDraft => ({ label: '', externalId: '', phone: '' });
 
+// Per-channel UI badges for registration state (TZ §1038).
+const registrationBadge: Record<RegistrationState, { label: string; cls: string }> = {
+  unpaired: { label: 'не прив\'язано', cls: 'bg-slate-100 text-slate-600' },
+  qr_pending: { label: 'чекає QR...', cls: 'bg-amber-100 text-amber-700' },
+  qr_displayed: { label: 'QR на екрані', cls: 'bg-amber-100 text-amber-700' },
+  sms_pending: { label: 'чекає SMS...', cls: 'bg-amber-100 text-amber-700' },
+  verifying: { label: 'перевірка коду', cls: 'bg-amber-100 text-amber-700' },
+  linked: { label: 'прив\'язано', cls: 'bg-green-100 text-green-700' },
+  relink_needed: { label: 'потрібна повторна прив\'язка', cls: 'bg-orange-100 text-orange-700' },
+  failed: { label: 'помилка', cls: 'bg-red-100 text-red-700' },
+};
+
 export default function ChannelsPage() {
-  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [accounts, setAccounts] = useState<TransportAccount[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [drafts, setDrafts] = useState<Record<string, EndpointDraft>>({});
+  const [wizardFor, setWizardFor] = useState<TransportAccount | null>(null);
 
   async function fetchAccounts() {
     try {
-      const res = await api.get('/transport-accounts');
+      const res = await api.get<TransportAccount[]>('/transport-accounts');
       setAccounts(res.data);
     } catch (err) {
       setError('Не вдалося завантажити канали.');
@@ -108,11 +117,27 @@ export default function ChannelsPage() {
     }
   }
 
+  async function unlinkEndpoint(id: string) {
+    if (!confirm('Відв\'язати пристрій від цього каналу?')) return;
+    try {
+      await api.delete(`/endpoints/${id}/registration`);
+      await fetchAccounts();
+    } catch (err) {
+      setError('Не вдалося відв\'язати пристрій.');
+    }
+  }
+
   function updateDraft(accountId: string, patch: Partial<EndpointDraft>) {
     setDrafts((prev) => ({
       ...prev,
       [accountId]: { ...(prev[accountId] ?? emptyDraft()), ...patch },
     }));
+  }
+
+  // Channels that can be linked at runtime via QR. SMS uses physical SIMs,
+  // so provisioning is not supported there (TZ §21 / capabilities).
+  function canProvision(acc: TransportAccount): boolean {
+    return acc.type === 'signal' || acc.type === 'whatsapp';
   }
 
   if (loading) return <div className="p-8">Завантаження...</div>;
@@ -122,7 +147,8 @@ export default function ChannelsPage() {
       <h2 className="text-2xl font-bold">Канали</h2>
       <p className="mt-2 text-slate-500">
         Три транспортних канали вже налаштовані. Додавайте телефонні номери або SIM-лінії, з яких
-        потрібно надсилати повідомлення.
+        потрібно надсилати повідомлення. Signal та WhatsApp підтримують прив'язку через QR-код
+        прямо в інтерфейсі.
       </p>
 
       {error && (
@@ -152,54 +178,101 @@ export default function ChannelsPage() {
                     </div>
                   </div>
                 </div>
-                <button
-                  onClick={() => toggleAccount(acc.id, acc.status)}
-                  className="rounded border p-2 hover:bg-slate-100"
-                  title={isActive ? 'Вимкнути канал' : 'Увімкнути канал'}
-                >
-                  {isActive ? <PowerOff size={16} /> : <Power size={16} />}
-                </button>
+                <div className="flex gap-2">
+                  {canProvision(acc) && (
+                    <button
+                      onClick={() => setWizardFor(acc)}
+                      className="flex items-center gap-1 rounded border border-blue-600 px-3 py-2 text-blue-600 hover:bg-blue-50"
+                      title="Прив'язати пристрій через QR"
+                    >
+                      <Link2 size={16} /> Прив'язати
+                    </button>
+                  )}
+                  <button
+                    onClick={() => toggleAccount(acc.id, acc.status)}
+                    className="rounded border p-2 hover:bg-slate-100"
+                    title={isActive ? 'Вимкнути канал' : 'Увімкнути канал'}
+                  >
+                    {isActive ? <PowerOff size={16} /> : <Power size={16} />}
+                  </button>
+                </div>
               </div>
 
               {acc.endpoints.length > 0 && (
                 <div className="mt-4">
                   <h4 className="mb-2 text-sm font-medium">Номери / лінії</h4>
                   <div className="space-y-2">
-                    {acc.endpoints.map((ep) => (
-                      <div
-                        key={ep.id}
-                        className="flex items-center justify-between rounded border p-2"
-                      >
-                        <div className="text-sm">
-                          <span className="font-medium">{ep.label}</span>
-                          {ep.externalId && (
-                            <span className="ml-2 text-slate-400">лінія {ep.externalId}</span>
-                          )}
-                          {ep.phoneE164 && (
-                            <span className="ml-2 text-slate-400">{ep.phoneE164}</span>
-                          )}{' '}
-                          <span className={ep.enabled ? 'text-green-600' : 'text-slate-400'}>
-                            · {ep.enabled ? 'увімкнений' : 'вимкнений'}
-                          </span>
+                    {acc.endpoints.map((ep) => {
+                      const regState: RegistrationState =
+                        ep.registrationState ?? 'unpaired';
+                      const badge = registrationBadge[regState];
+                      return (
+                        <div
+                          key={ep.id}
+                          className="flex items-center justify-between rounded border p-2"
+                        >
+                          <div className="text-sm">
+                            <span className="font-medium">{ep.label}</span>
+                            {ep.externalId && (
+                              <span className="ml-2 text-slate-400">лінія {ep.externalId}</span>
+                            )}
+                            {ep.phoneE164 && (
+                              <span className="ml-2 text-slate-400">{ep.phoneE164}</span>
+                            )}{' '}
+                            <span className={ep.enabled ? 'text-green-600' : 'text-slate-400'}>
+                              · {ep.enabled ? 'увімкнений' : 'вимкнений'}
+                            </span>
+                            {canProvision(acc) && (
+                              <>
+                                {' · '}
+                                <span
+                                  className={`rounded px-1.5 py-0.5 text-xs ${badge.cls}`}
+                                  title={
+                                    ep.deviceName ? `device: ${ep.deviceName}` : regState
+                                  }
+                                >
+                                  {badge.label}
+                                </span>
+                              </>
+                            )}
+                          </div>
+                          <div className="flex gap-2">
+                            {canProvision(acc) && regState === 'linked' && (
+                              <button
+                                onClick={() => unlinkEndpoint(ep.id)}
+                                className="rounded border p-1 text-orange-600 hover:bg-orange-50"
+                                title="Відв'язати пристрій від каналу"
+                              >
+                                <Unlink size={14} />
+                              </button>
+                            )}
+                            {canProvision(acc) && regState !== 'linked' && regState !== 'unpaired' && (
+                              <button
+                                onClick={() => setWizardFor(acc)}
+                                className="rounded border p-1 text-blue-600 hover:bg-blue-50"
+                                title="Відновити прив'язку"
+                              >
+                                <Link2 size={14} />
+                              </button>
+                            )}
+                            <button
+                              onClick={() => toggleEndpoint(ep.id, ep.enabled)}
+                              className="rounded border p-1 hover:bg-slate-100"
+                              title={ep.enabled ? 'Вимкнути' : 'Увімкнути'}
+                            >
+                              {ep.enabled ? <PowerOff size={14} /> : <Power size={14} />}
+                            </button>
+                            <button
+                              onClick={() => deleteEndpoint(ep.id)}
+                              className="rounded border p-1 text-red-600 hover:bg-red-50"
+                              title="Видалити"
+                            >
+                              <Trash2 size={14} />
+                            </button>
+                          </div>
                         </div>
-                        <div className="flex gap-2">
-                          <button
-                            onClick={() => toggleEndpoint(ep.id, ep.enabled)}
-                            className="rounded border p-1 hover:bg-slate-100"
-                            title={ep.enabled ? 'Вимкнути' : 'Увімкнути'}
-                          >
-                            {ep.enabled ? <PowerOff size={14} /> : <Power size={14} />}
-                          </button>
-                          <button
-                            onClick={() => deleteEndpoint(ep.id)}
-                            className="rounded border p-1 text-red-600 hover:bg-red-50"
-                            title="Видалити"
-                          >
-                            <Trash2 size={14} />
-                          </button>
-                        </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 </div>
               )}
@@ -254,6 +327,16 @@ export default function ChannelsPage() {
           );
         })}
       </section>
+
+      {wizardFor && (
+        <ProvisioningWizard
+          account={wizardFor}
+          onClose={() => setWizardFor(null)}
+          onLinked={() => {
+            void fetchAccounts();
+          }}
+        />
+      )}
     </div>
   );
 }
