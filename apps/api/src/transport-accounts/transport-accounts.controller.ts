@@ -17,12 +17,15 @@ import {
   CreateEndpointDto,
   UpdateEndpointDto,
 } from './transport-accounts.dto';
+import { ProvisioningService } from './provisioning.service';
+import { ProvisionQrDto, ProvisionVerifyDto } from './provisioning.dto';
 
 @Controller('transport-accounts')
 @UseGuards(SessionGuard)
 export class TransportAccountsController {
   constructor(
     private readonly service: TransportAccountsService,
+    private readonly provisioning: ProvisioningService,
   ) {}
 
   private actor(req: unknown): string | null {
@@ -94,6 +97,40 @@ export class TransportAccountsController {
       this.actor(req),
     );
   }
+
+  // ─────────────────── Provisioning (TZ §1038) ───────────────────
+
+  @Post(':id/provision/qrcode')
+  provisionQr(
+    @Param('id') accountId: string,
+    @Body() dto: ProvisionQrDto,
+    @Request() req: unknown,
+  ) {
+    return this.provisioning.startQr(accountId, dto, this.actor(req));
+  }
+
+  @Get(':id/provision/accounts')
+  listSidecarAccounts(@Param('id') accountId: string) {
+    return this.provisioning.listSidecarAccounts(accountId);
+  }
+
+  @Get(':id/provision/:endpointId/poll')
+  pollProvisioning(
+    @Param('id') accountId: string,
+    @Param('endpointId') endpointId: string,
+  ) {
+    return this.provisioning.poll(accountId, endpointId);
+  }
+
+  @Post(':id/provision/:endpointId/verify')
+  verifyProvisioning(
+    @Param('id') accountId: string,
+    @Param('endpointId') endpointId: string,
+    @Body() dto: ProvisionVerifyDto,
+    @Request() req: unknown,
+  ) {
+    return this.provisioning.verify(accountId, endpointId, dto, this.actor(req));
+  }
 }
 
 @Controller('endpoints')
@@ -101,6 +138,7 @@ export class TransportAccountsController {
 export class EndpointsController {
   constructor(
     private readonly service: TransportAccountsService,
+    private readonly provisioning: ProvisioningService,
   ) {}
 
   private actor(req: unknown): string | null {
@@ -130,5 +168,10 @@ export class EndpointsController {
   @Delete(':id')
   delete(@Param('id') id: string, @Request() req: unknown) {
     return this.service.deleteEndpoint(id, this.actor(req));
+  }
+
+  @Delete(':id/registration')
+  unlinkRegistration(@Param('id') id: string, @Request() req: unknown) {
+    return this.provisioning.unlink(id, this.actor(req));
   }
 }
