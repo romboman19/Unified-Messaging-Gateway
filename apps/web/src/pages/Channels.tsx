@@ -22,7 +22,7 @@ type EndpointDraft = {
 
 const typeLabel: Record<TransportAccount['type'], string> = {
   sms: 'SMS / DBLtek GoIP',
-  whatsapp: 'WhatsApp / UnoAPI',
+  whatsapp: 'WhatsApp / UnoAPI або go-whatsapp-web-multidevice',
   signal: 'Signal / signal-cli-rest-api',
   mock: 'Mock (dev only)',
 };
