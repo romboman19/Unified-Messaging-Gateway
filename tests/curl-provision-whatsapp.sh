@@ -29,13 +29,15 @@ if [[ -z "${BASE:-}" ]]; then
 fi
 
 STUB_BASE="${STUB_BASE:-http://unoapi:9876}"
+STUB_CONTAINER="${STUB_CONTAINER:-umg-unoapi}"
+STUB_PORT="${STUB_PORT:-9876}"
 
 echo "── 1. Login ──"
 COOKIE=$(mktemp)
 trap 'rm -f "$COOKIE"' EXIT
 curl -sS -c "$COOKIE" -X POST "$BASE/api/v1/auth/login" \
   -H 'content-type: application/json' \
-  -d "{\"password\":\"${ADMIN_BOOTSTRAP_PASSWORD:?}\"}" > /dev/null
+  -d "{\"username\":\"admin\",\"password\":\"${ADMIN_BOOTSTRAP_PASSWORD:?}\"}" > /dev/null
 
 echo "── 2. Find WhatsApp transport account ──"
 ACCT_ID=$(curl -sS -b "$COOKIE" "$BASE/api/v1/transport-accounts" \
@@ -60,7 +62,12 @@ echo "  OK — $URI"
 
 echo "── 5. Simulate phone scan via dev-only stub hook ──"
 PHONE_NO_PLUS=${PHONE#+}
-curl -sS -X POST "$STUB_BASE/session/$PHONE_NO_PLUS/_stub/connect"
+if curl -sS -m 2 -o /dev/null "$STUB_BASE/ping" 2>/dev/null; then
+  curl -sS -X POST "$STUB_BASE/session/$PHONE_NO_PLUS/_stub/connect"
+else
+  # Stub isn't reachable from host; reach the docker container directly.
+  docker exec "$STUB_CONTAINER" node -e "fetch('http://127.0.0.1:$STUB_PORT/session/$PHONE_NO_PLUS/_stub/connect',{method:'POST',headers:{'content-type':'application/json'},body:'{}'}).then(r=>r.text()).then(console.log).catch(e=>{console.error(e);process.exit(1)})"
+fi
 echo
 
 echo "── 6. Poll until linked ──"

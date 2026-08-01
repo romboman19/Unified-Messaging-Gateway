@@ -149,7 +149,7 @@ function buildApp() {
 
     // Dev-only: simulate the admin scanning the QR on their phone.
     app.post('/v1/_stub/link', (req, res) => {
-      const deviceName = String(req.body?.device_name ?? '').trim();
+      const deviceName = String(req.body?.device_name ?? req.body?.deviceName ?? '').trim();
       if (!deviceName) {
         return res.status(400).json({ error: 'device_name required' });
       }
