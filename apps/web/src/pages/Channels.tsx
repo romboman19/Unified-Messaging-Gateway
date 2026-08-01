@@ -10,7 +10,6 @@ import {
   Unlink,
 } from 'lucide-react';
 import type {
-  Endpoint,
   RegistrationState,
   TransportAccount,
 } from '../lib/types';
@@ -26,6 +25,7 @@ const typeLabel: Record<TransportAccount['type'], string> = {
   sms: 'SMS / DBLtek GoIP',
   whatsapp: 'WhatsApp / UnoAPI',
   signal: 'Signal / signal-cli-rest-api',
+  mock: 'Mock (dev only)',
 };
 
 const emptyDraft = (): EndpointDraft => ({ label: '', externalId: '', phone: '' });
