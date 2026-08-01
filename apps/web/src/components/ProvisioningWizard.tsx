@@ -1,10 +1,9 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { QrImage } from './QrImage';
 import { api } from '../hooks/useAuth';
 import { Modal } from './ui';
 import type {
   Endpoint,
-  ProvisionedAccount,
   ProvisionPollResult,
   ProvisionQrResult,
   RegistrationState,
@@ -16,19 +15,21 @@ type WizardState =
   | { kind: 'entering' }
   | { kind: 'qr'; endpointId: string; uri: string; ttlSeconds: number }
   | { kind: 'linked'; endpoint: Endpoint }
-  | { kind: 'failed'; message: string }
-  | { kind: 'reconcile'; orphaned: ProvisionedAccount[] };
+  | { kind: 'failed'; message: string };
 
 /**
  * QR provisioning wizard for Signal & WhatsApp channels (TZ §1038).
  *
  * State machine:
  *   idle → entering → qr → linked | failed
- *                    ↘ reconcile (orphan sidecar accounts detected)
  *
  * While the QR is on screen the wizard polls the API every 2 s. The user
  * can close the modal without cancelling — the endpoint row stays in
  * `qr_displayed`, so they can reopen the wizard and resume polling.
+ *
+ * Per-kind inputs:
+ *   - Signal:   label + deviceName (phone comes BACK from sidecar)
+ *   - WhatsApp: label + phoneE164 (UnoAPI is per-phone)
  */
 export function ProvisioningWizard({
   account,
@@ -43,48 +44,19 @@ export function ProvisioningWizard({
   const [label, setLabel] = useState('');
   const [deviceName, setDeviceName] = useState('');
   const [phoneE164, setPhoneE164] = useState('');
-  const [pollSeq, setPollSeq] = useState(0); // bump to force re-mount of poll effect
-  const cancelledRef = useRef(false);
 
   const isSignal = account.adapter === 'signal-cli-rest-api';
   const isWhatsapp = account.adapter === 'unoapi';
-
-  // ───── reconciliation: list sidecar accounts on open ─────
-  useEffect(() => {
-    cancelledRef.current = false;
-    void (async () => {
-      try {
-        const res = await api.get<{ accounts: ProvisionedAccount[] }>(
-          `/transport-accounts/${account.id}/provision/accounts`,
-        );
-        const localPhones = new Set(
-          account.endpoints
-            .map((e) => e.phoneE164)
-            .filter((p): p is string => Boolean(p)),
-        );
-        const orphaned = (res.data.accounts ?? []).filter(
-          (a) => a.phoneE164 && !localPhones.has(a.phoneE164),
-        );
-        if (orphaned.length > 0 && !cancelledRef.current) {
-          setState({ kind: 'reconcile', orphaned });
-        }
-      } catch {
-        // Sidecar down on initial load — ignore; user can still try to add.
-      }
-    })();
-    return () => {
-      cancelledRef.current = true;
-    };
-  }, [account.id, account.adapter]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ───── polling once we have a QR ─────
   useEffect(() => {
     if (state.kind !== 'qr') return;
     let active = true;
+    const endpointId = state.endpointId;
     const tick = async () => {
       try {
         const res = await api.get<ProvisionPollResult>(
-          `/transport-accounts/${account.id}/provision/${state.endpointId}/poll`,
+          `/transport-accounts/${account.id}/provision/${endpointId}/poll`,
         );
         if (!active) return;
         if (res.data.state === 'linked') {
@@ -93,7 +65,7 @@ export function ProvisioningWizard({
         } else if (res.data.state === 'failed') {
           setState({
             kind: 'failed',
-            message: 'Час очікування QR вичерпано. Запитайте новий.',
+            message: 'Час очікування QR вичерпано.',
           });
         }
       } catch {
@@ -106,17 +78,20 @@ export function ProvisioningWizard({
       active = false;
       clearInterval(handle);
     };
-  }, [state.kind === 'qr' ? state.endpointId : null, pollSeq]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [state.kind, state.kind === 'qr' ? state.endpointId : null, account.id, onLinked]);
 
   async function start() {
     if (!label.trim()) return;
+    if (isSignal && !deviceName.trim()) return;
+    if (isWhatsapp && !phoneE164.trim()) return;
     setState({ kind: 'entering' });
     try {
       const payload: Record<string, string> = {
+        kind: isSignal ? 'signal' : 'whatsapp',
         label: label.trim(),
-        deviceName: (deviceName || phoneE164).trim(),
       };
-      if (phoneE164.trim()) payload['phoneE164'] = phoneE164.trim();
+      if (isSignal) payload['deviceName'] = deviceName.trim();
+      if (isWhatsapp) payload['phoneE164'] = phoneE164.trim();
       const res = await api.post<ProvisionQrResult>(
         `/transport-accounts/${account.id}/provision/qrcode`,
         payload,
@@ -144,32 +119,6 @@ export function ProvisioningWizard({
       // Endpoint may already be in a terminal state — ignore.
     }
     setState({ kind: 'idle' });
-  }
-
-  async function reattach(orphaned: ProvisionedAccount) {
-    if (!orphaned.externalId) return;
-    // Pick any existing endpoint in the unpaired state to attach to.
-    const target = account.endpoints.find(
-      (e) => e.registrationState === 'unpaired' || !e.registrationState,
-    );
-    if (!target) {
-      setState({
-        kind: 'failed',
-        message: 'Створіть новий endpoint для привʼязки знайденого акаунта.',
-      });
-      return;
-    }
-    try {
-      await api.post(
-        `/transport-accounts/${account.id}/provision/${target.id}/reattach`,
-        { externalId: orphaned.externalId },
-      );
-      onLinked();
-      onClose();
-    } catch (err: any) {
-      const msg = err?.response?.data?.message ?? 'Не вдалося привʼязати акаунт.';
-      setState({ kind: 'failed', message: String(msg) });
-    }
   }
 
   return (
@@ -246,15 +195,6 @@ export function ProvisioningWizard({
           )}
           <div className="flex gap-2">
             <button
-              onClick={() => {
-                setState({ kind: 'idle' });
-                setPollSeq((s) => s + 1);
-              }}
-              className="rounded border px-4 py-2 text-sm hover:bg-slate-100"
-            >
-              Перегенерувати
-            </button>
-            <button
               onClick={cancelProvision}
               className="rounded border px-4 py-2 text-sm text-red-600 hover:bg-red-50"
             >
@@ -292,38 +232,6 @@ export function ProvisioningWizard({
             </button>
             <button onClick={onClose} className="rounded border px-4 py-2 text-sm hover:bg-slate-100">
               Закрити
-            </button>
-          </div>
-        </div>
-      )}
-
-      {state.kind === 'reconcile' && (
-        <div className="space-y-4">
-          <p className="text-sm text-slate-600">
-            Знайдено {state.orphaned.length} акаунт(ів) на транспорті, які не привʼязані до жодного endpoint:
-          </p>
-          <ul className="space-y-2">
-            {state.orphaned.map((o) => (
-              <li key={o.externalId} className="flex items-center justify-between rounded border p-2">
-                <span className="text-sm">
-                  {o.phoneE164 ?? o.externalId}
-                  {o.deviceName && <span className="ml-2 text-slate-400">({o.deviceName})</span>}
-                </span>
-                <button
-                  onClick={() => reattach(o)}
-                  className="rounded border px-3 py-1 text-sm hover:bg-slate-100"
-                >
-                  Привʼязати
-                </button>
-              </li>
-            ))}
-          </ul>
-          <div className="flex justify-end">
-            <button
-              onClick={() => setState({ kind: 'idle' })}
-              className="rounded border px-4 py-2 text-sm hover:bg-slate-100"
-            >
-              Додати новий
             </button>
           </div>
         </div>

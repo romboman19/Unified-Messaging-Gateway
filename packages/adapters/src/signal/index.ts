@@ -8,7 +8,13 @@ import type {
   EndpointConfig,
   SendResult,
 } from '@umg/channel-sdk';
-import { makeAddress } from '@umg/channel-sdk';
+import {
+  makeAddress,
+  ProvisioningError,
+  type ProvisionedAccount,
+  type ProvisionQrInput,
+  type ProvisionQrResult,
+} from '@umg/channel-sdk';
 
 /**
  * Adapter for the `signal-cli-rest-api` sidecar
@@ -63,6 +69,8 @@ export class SignalCliRestApiAdapter {
         reactions: true,
         voice: true,
         media: true,
+        // TZ §1038 — Signal exposes a linked-device QR flow.
+        provisioning: 'qr',
       },
     };
   }
@@ -215,5 +223,108 @@ export class SignalCliRestApiAdapter {
       receivedAt: new Date(ts),
       rawPayload: raw,
     }];
+  }
+
+  // ─── Provisioning (TZ §1038) — Signal linked-device via QR ────────────
+
+  /**
+   * Signal linked-device wizard — `GET /v1/qrcodelink?device_name=...`
+   *
+   * The phone is NOT supplied by the caller; the sidecar returns it after
+   * the user scans the QR with their Signal mobile app. We persist the
+   * deviceName as `sessionId` so subsequent polls can correlate.
+   */
+  async provisionQr(
+    account: AccountConfig,
+    input: ProvisionQrInput,
+  ): Promise<ProvisionQrResult> {
+    const deviceName = String(input.deviceName ?? '').trim();
+    if (!deviceName) {
+      throw new ProvisioningError(
+        'deviceName is required',
+        'INVALID_INPUT',
+        false,
+      );
+    }
+    const url = `${this.baseUrl(account)}/v1/qrcodelink?device_name=${encodeURIComponent(
+      deviceName,
+    )}`;
+    let res: Response;
+    try {
+      res = await fetch(url, { method: 'GET' });
+    } catch (e: any) {
+      throw new ProvisioningError(
+        `signal-cli-rest-api qrcodelink network error: ${e?.message ?? e}`,
+        'TRANSPORT_ERROR',
+        true,
+      );
+    }
+    const body: any = await res.json().catch(() => ({}));
+    if (!res.ok || !body?.uri) {
+      throw new ProvisioningError(
+        `signal-cli-rest-api qrcodelink returned ${res.status}`,
+        res.status >= 500 ? 'TRANSPORT_ERROR' : 'BAD_RESPONSE',
+        res.status >= 500,
+        body,
+      );
+    }
+    return {
+      sessionId: deviceName,
+      uri: String(body.uri),
+      ttlSeconds: Number(body.expires_in ?? 600),
+    };
+  }
+
+  /** `GET /v1/accounts` — list devices already paired with the sidecar. */
+  async listProvisionedAccounts(account: AccountConfig): Promise<ProvisionedAccount[]> {
+    const url = `${this.baseUrl(account)}/v1/accounts`;
+    let res: Response;
+    try {
+      res = await fetch(url, { method: 'GET' });
+    } catch (e: any) {
+      throw new ProvisioningError(
+        `signal-cli-rest-api list accounts network error: ${e?.message ?? e}`,
+        'TRANSPORT_ERROR',
+        true,
+      );
+    }
+    if (!res.ok) {
+      throw new ProvisioningError(
+        `signal-cli-rest-api list accounts returned ${res.status}`,
+        res.status >= 500 ? 'TRANSPORT_ERROR' : 'BAD_RESPONSE',
+        res.status >= 500,
+      );
+    }
+    const body: any = await res.json().catch(() => []);
+    if (!Array.isArray(body)) return [];
+    return body.map((a: any) => ({
+      externalId: String(a?.number ?? ''),
+      phoneE164: a?.number ? String(a.number) : null,
+      uuid: a?.uuid ? String(a.uuid) : null,
+      deviceName: a?.device_name ?? a?.deviceName ?? null,
+      raw: a,
+    }));
+  }
+
+  /** `DELETE /v1/accounts/{number}` — detach a paired device. */
+  async unlink(account: AccountConfig, externalId: string): Promise<void> {
+    const url = `${this.baseUrl(account)}/v1/accounts/${encodeURIComponent(externalId)}`;
+    let res: Response;
+    try {
+      res = await fetch(url, { method: 'DELETE' });
+    } catch (e: any) {
+      throw new ProvisioningError(
+        `signal-cli-rest-api unlink network error: ${e?.message ?? e}`,
+        'TRANSPORT_ERROR',
+        true,
+      );
+    }
+    if (!res.ok && res.status !== 404) {
+      throw new ProvisioningError(
+        `signal-cli-rest-api unlink returned ${res.status}`,
+        res.status >= 500 ? 'TRANSPORT_ERROR' : 'BAD_RESPONSE',
+        res.status >= 500,
+      );
+    }
   }
 }

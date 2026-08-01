@@ -8,7 +8,13 @@ import type {
   EndpointConfig,
   SendResult,
 } from '@umg/channel-sdk';
-import { makeAddress } from '@umg/channel-sdk';
+import {
+  makeAddress,
+  ProvisioningError,
+  type ProvisionedAccount,
+  type ProvisionQrInput,
+  type ProvisionQrResult,
+} from '@umg/channel-sdk';
 
 /**
  * Adapter for UnoAPI Cloud (https://github.com/clairton/unoapi-cloud).
@@ -60,6 +66,8 @@ export class UnoApiAdapter {
         groups: true,
         reactions: true,
         media: true,
+        // TZ §1038 — UnoAPI exposes a per-phone QR pairing flow.
+        provisioning: 'qr',
       },
     };
   }
@@ -224,6 +232,112 @@ export class UnoApiAdapter {
       receivedAt: new Date(Number(m.timestamp ?? Date.now()) * 1000),
       rawPayload: m,
     }));
+  }
+
+  // ─── Provisioning (TZ §1038) — UnoAPI per-phone QR pairing ───────────
+
+  /**
+   * UnoAPI provisioning — `GET /session/{phone}/qr`.
+   *
+   * Unlike Signal, UnoAPI requires the phone number up front (sessions are
+   * per-phone). The wizard in the web UI surfaces a phone input when the
+   * admin clicks "Прив'язати" on a WhatsApp channel.
+   */
+  async provisionQr(
+    account: AccountConfig,
+    input: ProvisionQrInput,
+  ): Promise<ProvisionQrResult> {
+    const phone = String(input.deviceName ?? '').trim();
+    if (!phone) {
+      throw new ProvisioningError(
+        'phoneE164 is required for UnoAPI',
+        'INVALID_INPUT',
+        false,
+      );
+    }
+    const normalized = phone.replace(/^\+/, '');
+    const url = `${this.baseUrl(account)}/session/${encodeURIComponent(normalized)}/qr`;
+    let res: Response;
+    try {
+      res = await fetch(url, { method: 'GET' });
+    } catch (e: any) {
+      throw new ProvisioningError(
+        `unoapi qr network error: ${e?.message ?? e}`,
+        'TRANSPORT_ERROR',
+        true,
+      );
+    }
+    const body: any = await res.json().catch(() => ({}));
+    if (!res.ok || !body?.qr) {
+      throw new ProvisioningError(
+        `unoapi qr returned ${res.status}`,
+        res.status >= 500 ? 'TRANSPORT_ERROR' : 'BAD_RESPONSE',
+        res.status >= 500,
+        body,
+      );
+    }
+    return {
+      sessionId: normalized,
+      uri: String(body.qr),
+      ttlSeconds: Number(body.expires_in ?? 120),
+    };
+  }
+
+  /** `GET /admin/sessions` — list phones already paired with this UnoAPI node. */
+  async listProvisionedAccounts(account: AccountConfig): Promise<ProvisionedAccount[]> {
+    const url = `${this.baseUrl(account)}/admin/sessions`;
+    let res: Response;
+    try {
+      res = await fetch(url, { method: 'GET' });
+    } catch (e: any) {
+      throw new ProvisioningError(
+        `unoapi list sessions network error: ${e?.message ?? e}`,
+        'TRANSPORT_ERROR',
+        true,
+      );
+    }
+    if (!res.ok) {
+      throw new ProvisioningError(
+        `unoapi list sessions returned ${res.status}`,
+        res.status >= 500 ? 'TRANSPORT_ERROR' : 'BAD_RESPONSE',
+        res.status >= 500,
+      );
+    }
+    const body: any = await res.json().catch(() => []);
+    const list: any[] = Array.isArray(body) ? body : Array.isArray(body?.sessions) ? body.sessions : [];
+    return list.map((s: any) => {
+      const phone = String(s?.phone ?? s?.id ?? '');
+      return {
+        externalId: phone,
+        phoneE164: phone ? `+${phone.replace(/^\+/, '')}` : null,
+        uuid: null,
+        deviceName: phone,
+        raw: s,
+      };
+    });
+  }
+
+  /** `DELETE /session/{phone}` — drop a paired UnoAPI session. */
+  async unlink(account: AccountConfig, externalId: string): Promise<void> {
+    const phone = externalId.replace(/^\+/, '');
+    const url = `${this.baseUrl(account)}/session/${encodeURIComponent(phone)}`;
+    let res: Response;
+    try {
+      res = await fetch(url, { method: 'DELETE' });
+    } catch (e: any) {
+      throw new ProvisioningError(
+        `unoapi unlink network error: ${e?.message ?? e}`,
+        'TRANSPORT_ERROR',
+        true,
+      );
+    }
+    if (!res.ok && res.status !== 404) {
+      throw new ProvisioningError(
+        `unoapi unlink returned ${res.status}`,
+        res.status >= 500 ? 'TRANSPORT_ERROR' : 'BAD_RESPONSE',
+        res.status >= 500,
+      );
+    }
   }
 }
 

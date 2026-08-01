@@ -2,7 +2,6 @@ import { useEffect, useState } from 'react';
 import { api } from '../hooks/useAuth';
 import {
   Trash2,
-  Plus,
   Radio,
   Power,
   PowerOff,
@@ -146,9 +145,9 @@ export default function ChannelsPage() {
     <div className="p-8">
       <h2 className="text-2xl font-bold">Канали</h2>
       <p className="mt-2 text-slate-500">
-        Три транспортних канали вже налаштовані. Додавайте телефонні номери або SIM-лінії, з яких
-        потрібно надсилати повідомлення. Signal та WhatsApp підтримують прив'язку через QR-код
-        прямо в інтерфейсі.
+        Три транспортних канали вже налаштовані. Signal та WhatsApp підтримують прив'язку
+        нового номера через QR-код прямо в інтерфейсі — натисніть «Прив'язати номер».
+        Для SMS додавайте лінії вручну.
       </p>
 
       {error && (
@@ -182,10 +181,10 @@ export default function ChannelsPage() {
                   {canProvision(acc) && (
                     <button
                       onClick={() => setWizardFor(acc)}
-                      className="flex items-center gap-1 rounded border border-blue-600 px-3 py-2 text-blue-600 hover:bg-blue-50"
-                      title="Прив'язати пристрій через QR"
+                      className="flex items-center gap-1 rounded bg-blue-600 px-3 py-2 text-white hover:bg-blue-700"
+                      title="Прив'язати новий номер через QR"
                     >
-                      <Link2 size={16} /> Прив'язати
+                      <Link2 size={16} /> Прив'язати номер
                     </button>
                   )}
                   <button
@@ -240,28 +239,30 @@ export default function ChannelsPage() {
                             {canProvision(acc) && regState === 'linked' && (
                               <button
                                 onClick={() => unlinkEndpoint(ep.id)}
-                                className="rounded border p-1 text-orange-600 hover:bg-orange-50"
+                                className="flex items-center gap-1 rounded border p-1 text-orange-600 hover:bg-orange-50"
                                 title="Відв'язати пристрій від каналу"
                               >
-                                <Unlink size={14} />
+                                <Unlink size={14} /> Відв'язати
                               </button>
                             )}
-                            {canProvision(acc) && regState !== 'linked' && regState !== 'unpaired' && (
+                            {canProvision(acc) && (regState === 'qr_pending' || regState === 'qr_displayed') && (
                               <button
                                 onClick={() => setWizardFor(acc)}
-                                className="rounded border p-1 text-blue-600 hover:bg-blue-50"
-                                title="Відновити прив'язку"
+                                className="flex items-center gap-1 rounded border p-1 text-blue-600 hover:bg-blue-50"
+                                title="Показати QR ще раз"
                               >
-                                <Link2 size={14} />
+                                <Link2 size={14} /> QR
                               </button>
                             )}
-                            <button
-                              onClick={() => toggleEndpoint(ep.id, ep.enabled)}
-                              className="rounded border p-1 hover:bg-slate-100"
-                              title={ep.enabled ? 'Вимкнути' : 'Увімкнути'}
-                            >
-                              {ep.enabled ? <PowerOff size={14} /> : <Power size={14} />}
-                            </button>
+                            {acc.type === 'sms' && (
+                              <button
+                                onClick={() => toggleEndpoint(ep.id, ep.enabled)}
+                                className="rounded border p-1 hover:bg-slate-100"
+                                title={ep.enabled ? 'Вимкнути' : 'Увімкнути'}
+                              >
+                                {ep.enabled ? <PowerOff size={14} /> : <Power size={14} />}
+                              </button>
+                            )}
                             <button
                               onClick={() => deleteEndpoint(ep.id)}
                               className="rounded border p-1 text-red-600 hover:bg-red-50"
@@ -277,52 +278,50 @@ export default function ChannelsPage() {
                 </div>
               )}
 
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  void createEndpoint(acc.id);
-                }}
-                className="mt-4 grid grid-cols-1 gap-2 md:grid-cols-7"
-              >
-                <div className="md:col-span-3">
-                  <input
-                    className="w-full rounded border p-2"
-                    placeholder="Назва (наприклад: Основна SIM)"
-                    value={drafts[acc.id]?.label ?? ''}
-                    onChange={(e) => updateDraft(acc.id, { label: e.target.value })}
-                    required
-                  />
-                </div>
-                <div className="md:col-span-2">
-                  <input
-                    className="w-full rounded border p-2"
-                    placeholder={
-                      acc.type === 'sms'
-                        ? 'ID лінії GoIP (1..4)'
-                        : acc.type === 'whatsapp'
-                          ? 'ID в UnoAPI'
-                          : 'ID пристрою Signal'
-                    }
-                    value={drafts[acc.id]?.externalId ?? ''}
-                    onChange={(e) => updateDraft(acc.id, { externalId: e.target.value })}
-                  />
-                </div>
-                <div className="md:col-span-2">
-                  <input
-                    className="w-full rounded border p-2"
-                    placeholder="+380XXXXXXXXX"
-                    value={drafts[acc.id]?.phone ?? ''}
-                    onChange={(e) => updateDraft(acc.id, { phone: e.target.value })}
-                  />
-                </div>
-                <button
-                  type="submit"
-                  className="flex items-center justify-center gap-1 rounded bg-blue-600 py-2 text-white hover:bg-blue-700"
-                  title="Додати endpoint"
+              {/* SMS keeps the manual endpoint form. Signal/WhatsApp use the
+                  wizard exclusively — see ProvisioningWizard. */}
+              {acc.type === 'sms' && (
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    void createEndpoint(acc.id);
+                  }}
+                  className="mt-4 grid grid-cols-1 gap-2 md:grid-cols-7"
                 >
-                  <Plus size={16} /> Додати
-                </button>
-              </form>
+                  <div className="md:col-span-3">
+                    <input
+                      className="w-full rounded border p-2"
+                      placeholder="Назва (наприклад: Основна SIM)"
+                      value={drafts[acc.id]?.label ?? ''}
+                      onChange={(e) => updateDraft(acc.id, { label: e.target.value })}
+                      required
+                    />
+                  </div>
+                  <div className="md:col-span-2">
+                    <input
+                      className="w-full rounded border p-2"
+                      placeholder="ID лінії GoIP (1..4)"
+                      value={drafts[acc.id]?.externalId ?? ''}
+                      onChange={(e) => updateDraft(acc.id, { externalId: e.target.value })}
+                    />
+                  </div>
+                  <div className="md:col-span-2">
+                    <input
+                      className="w-full rounded border p-2"
+                      placeholder="+380XXXXXXXXX"
+                      value={drafts[acc.id]?.phone ?? ''}
+                      onChange={(e) => updateDraft(acc.id, { phone: e.target.value })}
+                    />
+                  </div>
+                  <button
+                    type="submit"
+                    className="flex items-center justify-center gap-1 rounded bg-blue-600 py-2 text-white hover:bg-blue-700"
+                    title="Додати endpoint"
+                  >
+                    Додати
+                  </button>
+                </form>
+              )}
             </div>
           );
         })}
