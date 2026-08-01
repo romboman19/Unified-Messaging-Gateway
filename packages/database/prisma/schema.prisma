@@ -50,6 +50,19 @@ enum TransportStatus {
   @@map("transport_status")
 }
 
+enum RegistrationState {
+  unpaired
+  qr_pending
+  qr_displayed
+  sms_pending
+  verifying
+  linked
+  relink_needed
+  failed
+
+  @@map("registration_state")
+}
+
 model TransportAccount {
   id              String          @id @default(uuid())
   type            ChannelType
@@ -66,21 +79,26 @@ model TransportAccount {
 }
 
 model Endpoint {
-  id            String          @id @default(uuid())
-  accountId     String          @map("account_id")
-  externalId    String?         @map("external_id")
-  phoneRaw      String?         @map("phone_raw")
-  phoneE164     String?         @map("phone_e164")
-  label         String
-  enabled       Boolean         @default(true)
-  configJson    Json            @default("{}") @map("config_json")
-  createdAt     DateTime        @default(now()) @map("created_at")
-  updatedAt     DateTime        @updatedAt @map("updated_at")
+  id               String            @id @default(uuid())
+  accountId        String            @map("account_id")
+  externalId       String?           @map("external_id")
+  phoneRaw         String?           @map("phone_raw")
+  phoneE164        String?           @map("phone_e164")
+  label            String
+  enabled          Boolean           @default(true)
+  configJson       Json              @default("{}") @map("config_json")
+  registrationState RegistrationState @default(unpaired) @map("registration_state")
+  deviceName       String?           @map("device_name")
+  uuid             String?           @unique
+  registeredAt     DateTime?         @map("registered_at")
+  createdAt        DateTime          @default(now()) @map("created_at")
+  updatedAt        DateTime          @updatedAt @map("updated_at")
 
   account       TransportAccount @relation(fields: [accountId], references: [id])
   messages      Message[]
   conversations Conversation[]
 
+  @@index([accountId, registrationState])
   @@map("endpoints")
 }
 

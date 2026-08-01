@@ -167,6 +167,8 @@ services:
     environment:
       STUB_VENDOR: unoapi
       STUB_PORT: "9876"
+    volumes:
+      - umg-unoapi-data:/home/unoapi/data
     networks:
       - transports
     restart: unless-stopped
@@ -185,6 +187,8 @@ services:
       SIGNAL_CLI_MODE: ${SIGNAL_CLI_MODE:-json-rpc}
       STUB_VENDOR: signal
       STUB_PORT: "8080"
+    volumes:
+      - umg-signal-data:/home/signal/data
     networks:
       - transports
     restart: unless-stopped
@@ -206,3 +210,9 @@ volumes:
   umg-postgres-data:
   umg-redis-data:
   umg-media-data:
+  # Persistent identity & session storage for transport sidecars.
+  # signal-cli keeps linked-device keys here; without a volume a container
+  # restart would force re-linking every Signal number (TZ §24).
+  umg-signal-data:
+  # UnoAPI keeps WhatsApp session creds here (TZ §23).
+  umg-unoapi-data:

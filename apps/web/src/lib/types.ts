@@ -68,12 +68,27 @@ export interface Conversation {
   } | null;
 }
 
+export type RegistrationState =
+  | 'unpaired'
+  | 'qr_pending'
+  | 'qr_displayed'
+  | 'sms_pending'
+  | 'verifying'
+  | 'linked'
+  | 'relink_needed'
+  | 'failed';
+
 export interface Endpoint {
   id: string;
   label: string;
   externalId: string | null;
   phoneE164: string | null;
+  phoneRaw: string | null;
   enabled: boolean;
+  registrationState?: RegistrationState;
+  deviceName?: string | null;
+  uuid?: string | null;
+  registeredAt?: string | null;
 }
 
 export interface TransportAccount {
@@ -194,4 +209,23 @@ export interface MessageEvent {
 export interface ListResponse<T> {
   items: T[];
   count: number;
+}
+
+export interface ProvisionedAccount {
+  externalId: string;
+  phoneE164: string | null;
+  uuid: string | null;
+  deviceName?: string | null;
+  raw: unknown;
+}
+
+export interface ProvisionQrResult {
+  endpointId: string;
+  uri: string;
+  ttlSeconds: number;
+}
+
+export interface ProvisionPollResult {
+  state: RegistrationState;
+  endpoint: Endpoint;
 }
