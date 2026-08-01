@@ -107,15 +107,29 @@ export class ProvisioningService {
       throw new NotImplementedException('Адаптер не реалізує QR-реєстрацію.');
     }
 
+    // Normalise the per-kind payload into one of:
+    //   signal   → { deviceName }
+    //   whatsapp → { deviceName = phoneE164 }
+    const deviceName = (dto.kind === 'whatsapp' ? dto.phoneE164 ?? '' : dto.deviceName ?? '').trim();
+    if (!deviceName) {
+      throw new BadRequestException(
+        dto.kind === 'whatsapp'
+          ? 'Для WhatsApp потрібен номер телефону.'
+          : 'Для Signal потрібен deviceName.',
+      );
+    }
+
     // 1. Create the endpoint row up-front so the wizard can poll against
     //    a stable id even if the user closes the tab mid-flow.
     const endpoint = await this.prisma.endpoint.create({
       data: {
         accountId,
         label: dto.label,
-        deviceName: dto.deviceName,
-        externalId: dto.deviceName,
-        phoneE164: dto.phoneE164 ?? null,
+        deviceName,
+        // For Signal: externalId stays unset until sidecar returns a number.
+        // For WhatsApp: externalId is the phone (UnoAPI session id).
+        externalId: dto.kind === 'whatsapp' ? deviceName : null,
+        phoneE164: dto.kind === 'whatsapp' ? deviceName : null,
         registrationState: RegistrationState.qr_pending,
         enabled: false,
       },
@@ -124,7 +138,7 @@ export class ProvisioningService {
     try {
       const result: ProvisionQrResult = await adapter.provisionQr(
         this.accountConfig(account),
-        { deviceName: dto.deviceName },
+        { deviceName },
       );
       await this.prisma.endpoint.update({
         where: { id: endpoint.id },
@@ -133,6 +147,7 @@ export class ProvisioningService {
           configJson: {
             qrSessionId: result.sessionId,
             qrExpiresAt: new Date(Date.now() + result.ttlSeconds * 1000).toISOString(),
+            kind: dto.kind,
           } as never,
         },
       });
@@ -142,7 +157,7 @@ export class ProvisioningService {
         'endpoint',
         endpoint.id,
         {},
-        { deviceName: dto.deviceName, ttlSeconds: result.ttlSeconds },
+        { kind: dto.kind, deviceName, ttlSeconds: result.ttlSeconds },
       );
       return {
         endpointId: endpoint.id,
@@ -269,8 +284,31 @@ export class ProvisioningService {
           where: { id: endpoint.id },
           data: { registrationState: RegistrationState.failed },
         });
+        return result;
       }
-      return result;
+      // Verified — promote to `linked` and persist what the sidecar returned.
+      const linked = result.account;
+      const updated = await this.prisma.endpoint.update({
+        where: { id: endpoint.id },
+        data: {
+          registrationState: RegistrationState.linked,
+          uuid: linked?.uuid ?? endpoint.uuid,
+          phoneE164: linked?.phoneE164 ?? endpoint.phoneE164,
+          externalId: linked?.externalId ?? endpoint.externalId,
+          deviceName: linked?.deviceName ?? endpoint.deviceName,
+          registeredAt: new Date(),
+          enabled: true,
+        },
+      });
+      await this.audit.log(
+        actorId,
+        'endpoint.provision.verified',
+        'endpoint',
+        endpoint.id,
+        {},
+        { phoneE164: linked?.phoneE164, uuid: linked?.uuid },
+      );
+      return { verified: true, account: linked, endpoint: updated };
     } catch (err) {
       await this.audit.log(
         actorId,
@@ -307,6 +345,7 @@ export class ProvisioningService {
         registrationState: RegistrationState.unpaired,
         uuid: null,
         phoneE164: null,
+        externalId: null,
         registeredAt: null,
         deviceName: null,
         enabled: false,

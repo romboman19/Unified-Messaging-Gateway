@@ -66,7 +66,52 @@ function buildApp() {
 
   // ─────────────────── UnoAPI Cloud (WhatsApp) (TZ §23) ────────────────
   if (vendor === 'unoapi') {
+    // in-memory session store: phone → { state, qrUri }
+    const sessions = new Map();
+
     app.get('/ping', (_req, res) => res.json({ ok: true }));
+
+    // Provisioning — wizard entry point (mirrors real UnoAPI `/session/:phone/qr`).
+    app.get('/session/:phone/qr', (req, res) => {
+      const phone = req.params.phone;
+      if (!sessions.has(phone)) {
+        sessions.set(phone, { state: 'qr_pending', qrUri: null });
+      }
+      const session = sessions.get(phone);
+      session.qrUri =
+        session.qrUri ??
+        `waqr://session/${encodeURIComponent(phone)}?token=${Date.now().toString(36)}`;
+      res.json({
+        phone,
+        qr: session.qrUri,
+        state: session.state,
+      });
+    });
+
+    // Dev-only: simulate user scanning the QR on their phone.
+    app.post('/session/:phone/_stub/connect', (req, res) => {
+      const phone = req.params.phone;
+      if (!sessions.has(phone)) {
+        return res.status(404).json({ error: 'session not found' });
+      }
+      sessions.get(phone).state = 'connected';
+      res.json({ ok: true, phone, state: 'connected' });
+    });
+
+    app.get('/admin/sessions', (_req, res) => {
+      const list = [];
+      for (const [phone, s] of sessions.entries()) {
+        if (s.state === 'connected') {
+          list.push({ phone, state: s.state });
+        }
+      }
+      res.json(list);
+    });
+
+    app.delete('/session/:phone', (req, res) => {
+      sessions.delete(req.params.phone);
+      res.json({ ok: true });
+    });
 
     app.post('/v15.0/:phone/messages', (req, res) => {
       const externalId = `wa-msg-${Date.now()}`;
@@ -81,7 +126,53 @@ function buildApp() {
 
   // ─────────────────── signal-cli-rest-api (TZ §24) ────────────────────
   if (vendor === 'signal') {
+    // in-memory account store: deviceName → { number, deviceName, uuid }
+    const accounts = new Map();
+
     app.get('/v1/health', (_req, res) => res.json({ ok: true }));
+
+    // Provisioning — wizard entry point (mirrors real `GET /v1/qrcodelink`).
+    app.get('/v1/qrcodelink', (req, res) => {
+      const deviceName = String(req.query.device_name ?? '').trim();
+      if (!deviceName) {
+        return res.status(400).json({ error: 'device_name required' });
+      }
+      const uri = `signalcaptcha://signal.group/#device_name=${encodeURIComponent(
+        deviceName,
+      )}`;
+      res.json({
+        uri,
+        device_name: deviceName,
+        expires_in: 600,
+      });
+    });
+
+    // Dev-only: simulate the admin scanning the QR on their phone.
+    app.post('/v1/_stub/link', (req, res) => {
+      const deviceName = String(req.body?.device_name ?? '').trim();
+      if (!deviceName) {
+        return res.status(400).json({ error: 'device_name required' });
+      }
+      const number = `+10000000000`;
+      const uuid = `uuid-${deviceName}-${Math.random().toString(36).slice(2, 10)}`;
+      accounts.set(deviceName, { number, device_name: deviceName, uuid });
+      res.json({ ok: true, number, device_name: deviceName, uuid });
+    });
+
+    app.get('/v1/accounts', (_req, res) => {
+      res.json(Array.from(accounts.values()));
+    });
+
+    app.delete('/v1/accounts/:number', (req, res) => {
+      const target = req.params.number;
+      for (const [key, acc] of accounts.entries()) {
+        if (acc.number === target) {
+          accounts.delete(key);
+          return res.json({ ok: true });
+        }
+      }
+      res.status(404).json({ error: 'not found' });
+    });
 
     app.post('/v2/send', (req, res) => {
       const externalId = `${Date.now()}`;
@@ -89,7 +180,6 @@ function buildApp() {
       res.json({ results: { [req.body?.recipients?.[0] ?? 'unknown']: { timestamp: Date.now(), externalId } } });
     });
 
-    app.get('/v1/accounts', (_req, res) => res.json([]));
     app.post('/v1/register/:number', (_req, res) => res.json({ ok: true }));
     app.post('/v1/register/:number/verify/:code', (_req, res) => res.json({ ok: true }));
     app.post('/inbound-stub', (req, res) => res.json({ ok: true, body: req.body }));

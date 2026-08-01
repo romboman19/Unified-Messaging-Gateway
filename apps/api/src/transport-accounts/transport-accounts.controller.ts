@@ -18,7 +18,7 @@ import {
   UpdateEndpointDto,
 } from './transport-accounts.dto';
 import { ProvisioningService } from './provisioning.service';
-import { ProvisionQrDto, ProvisionVerifyDto } from './provisioning.dto';
+import { ProvisionQrDto, ProvisionVerifyDto, ReattachDto } from './provisioning.dto';
 
 @Controller('transport-accounts')
 @UseGuards(SessionGuard)
@@ -130,6 +130,21 @@ export class TransportAccountsController {
     @Request() req: unknown,
   ) {
     return this.provisioning.verify(accountId, endpointId, dto, this.actor(req));
+  }
+
+  @Post(':id/provision/:endpointId/reattach')
+  reattachProvisioning(
+    @Param('id') accountId: string,
+    @Param('endpointId') endpointId: string,
+    @Body() dto: ReattachDto,
+    @Request() req: unknown,
+  ) {
+    return this.provisioning.reattach(
+      accountId,
+      endpointId,
+      dto.externalId,
+      this.actor(req),
+    );
   }
 }
 

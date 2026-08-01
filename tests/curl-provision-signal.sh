@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# End-to-end verification of the QR provisioning flow (TZ §1038).
+# End-to-end verification of the Signal QR provisioning flow (TZ §1038).
 #
 # Pre-conditions:
 #   - docker compose stack is up (api, web, postgres, signal-cli-stub)
 #   - ADMIN_BOOTSTRAP_PASSWORD is in `.env` on the server
 #
 # What this proves:
-#   1. We can mint a QR via the API
+#   1. We can mint a QR via the API with the new `kind:'signal'` payload
 #   2. The stub-side `/v1/_stub/link` hook simulates a phone scan
 #   3. Polling detects the linked device and flips the endpoint to `linked`
-#   4. The endpoint row carries the new uuid / phoneE164
-#   5. `DELETE /endpoints/<id>/registration` cleanly unlinks
+#   4. The endpoint row carries the new uuid / phoneE164 / externalId
+#   5. `DELETE /endpoints/<id>/registration` cleanly unlinks + clears externalId
 #
 # Run on the dev server:
-#   base=http://localhost:8083
+#   export BASE=http://localhost:8083
 #   set -a; . ./.env; set +a
 #   bash tests/curl-provision-signal.sh
 set -euo pipefail
@@ -22,6 +22,8 @@ if [[ -z "${BASE:-}" ]]; then
   echo "Set BASE first (e.g. export BASE=http://localhost:8083)" >&2
   exit 1
 fi
+
+STUB_BASE="${STUB_BASE:-http://localhost:8080}"
 
 echo "── 1. Login ──"
 COOKIE=$(mktemp)
@@ -39,7 +41,7 @@ echo "── 3. Request QR ──"
 DEVICE_NAME="umg-e2e-$(date +%s)"
 RES=$(curl -sS -b "$COOKIE" -X POST "$BASE/api/v1/transport-accounts/$ACCT_ID/provision/qrcode" \
   -H 'content-type: application/json' \
-  -d "{\"label\":\"E2E signal\",\"deviceName\":\"$DEVICE_NAME\"}")
+  -d "{\"kind\":\"signal\",\"label\":\"E2E signal\",\"deviceName\":\"$DEVICE_NAME\"}")
 echo "  response: $RES"
 EP_ID=$(echo "$RES" | python3 -c 'import sys,json; print(json.load(sys.stdin)["endpointId"])')
 URI=$(echo "$RES" | python3 -c 'import sys,json; print(json.load(sys.stdin)["uri"])')
@@ -52,12 +54,13 @@ fi
 echo "  OK — $URI"
 
 echo "── 5. Simulate phone scan via dev-only stub hook ──"
-curl -sS -X POST "http://localhost:8080/v1/_stub/link" \
+curl -sS -X POST "$STUB_BASE/v1/_stub/link" \
   -H 'content-type: application/json' \
   -d "{\"deviceName\":\"$DEVICE_NAME\"}"
 echo
 
 echo "── 6. Poll until linked ──"
+STATE='unknown'
 for i in $(seq 1 15); do
   STATE=$(curl -sS -b "$COOKIE" "$BASE/api/v1/transport-accounts/$ACCT_ID/provision/$EP_ID/poll" \
     | python3 -c 'import sys,json; print(json.load(sys.stdin)["state"])')
@@ -71,7 +74,7 @@ if [[ "$STATE" != "linked" ]]; then
   exit 1
 fi
 
-echo "── 7. Verify endpoint row carries uuid + phoneE164 ──"
+echo "── 7. Verify endpoint row carries uuid + phoneE164 + externalId ──"
 curl -sS -b "$COOKIE" "$BASE/api/v1/transport-accounts" \
   | python3 -c "
 import sys, json
@@ -80,6 +83,7 @@ ep = [e for a in d for e in a['endpoints'] if e['id']=='$EP_ID'][0]
 assert ep['registrationState']=='linked', ep
 assert ep['phoneE164'], ep
 assert ep['uuid'], ep
+assert ep['externalId'], ep
 print('  OK —', json.dumps(ep, indent=2, ensure_ascii=False))
 "
 
@@ -96,6 +100,8 @@ ep = [e for a in d for e in a['endpoints'] if e['id']=='$EP_ID'][0]
 assert ep['registrationState']=='unpaired', ep
 assert ep['uuid'] is None, ep
 assert ep['phoneE164'] is None, ep
+assert ep['externalId'] is None, ep
+assert ep['deviceName'] is None, ep
 print('  OK — endpoint reset:', ep['registrationState'])
 "
 
