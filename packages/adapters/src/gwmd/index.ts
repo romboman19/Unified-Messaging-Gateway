@@ -368,13 +368,24 @@ export class GwmdAdapter {
       : Array.isArray(body?.results) ? body.results
       : Array.isArray(body?.data) ? body.data
       : [];
-    return list.map((d: any) => ({
-      externalId: String(d?.device_id ?? d?.id ?? ''),
-      phoneE164: d?.jid ? jidToPhone(d.jid) : null,
-      uuid: null,
-      deviceName: d?.device_id ?? d?.id ?? null,
-      raw: d,
-    }));
+    return list.map((d: any) => {
+      // gwmd's /devices list returns the per-device record built by
+      // `deriveState`: ID (== device_id), JID, State ∈ {Connected,
+      // LoggedIn, Disconnected}, PhoneNumber, DisplayName, CreatedAt.
+      // We surface device_id as externalId (gwmd treats it as the
+      // DELETE/GET /:id key), JID-derived E.164 as phoneE164, and the
+      // device_id again as deviceName so the poll matcher can pick the
+      // wizard's row back out via deviceName fallback.
+      const deviceId = String(d?.ID ?? d?.device_id ?? d?.id ?? '');
+      const jid = d?.JID ?? d?.jid ?? '';
+      return {
+        externalId: deviceId,
+        phoneE164: jid ? jidToPhone(jid) : (d?.PhoneNumber ?? d?.phone ?? null),
+        uuid: null,
+        deviceName: deviceId,
+        raw: d,
+      };
+    });
   }
 
   /** `DELETE /devices/:device_id` — log out (paired credentials kept on disk). */

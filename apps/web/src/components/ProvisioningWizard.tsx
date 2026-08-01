@@ -46,7 +46,20 @@ export function ProvisioningWizard({
   const [phoneE164, setPhoneE164] = useState('');
 
   const isSignal = account.adapter === 'signal-cli-rest-api';
-  const isWhatsapp = account.adapter === 'unoapi';
+  // Both UnoAPI (legacy) and gwmd (primary, TZ §1038) speak WhatsApp and
+  // both want the phone upfront as part of the wizard. We treat them
+  // identically from the UI's point of view; only the adapter behind the
+  // `kind:'whatsapp'` API payload differs.
+  const isWhatsapp = account.adapter === 'unoapi' || account.adapter === 'gwmd';
+
+  /** Some sidecars (gwmd) return the QR as an image URL — others (Signal,
+   *  UnoAPI) return a URI we must render to QR locally. Heuristic: any
+   *  `data:` / `http(s):` URL is treated as an image; anything else is a
+   *  raw URI to be QR-encoded.
+   */
+  function isImageUrl(uri: string): boolean {
+    return /^(data:|https?:\/\/)/i.test(uri);
+  }
 
   // ───── polling once we have a QR ─────
   useEffect(() => {
@@ -187,7 +200,21 @@ export function ProvisioningWizard({
           <p className="text-sm text-slate-600">
             Відскануйте QR у додатку {isSignal ? 'Signal' : 'WhatsApp'}. Після сканування endpoint автоматично стане активним.
           </p>
-          <QrImage uri={state.uri} />
+          {isImageUrl(state.uri) ? (
+            // gwmd returns a pre-rendered QR image (data: URL or http(s) URL).
+            // The sidecar's own renderer is the source of truth — we just
+            // forward the URL.
+            <img
+              src={state.uri}
+              alt="QR-код для прив'язки"
+              className="rounded border bg-white p-2"
+              style={{ maxWidth: '320px', height: 'auto' }}
+            />
+          ) : (
+            // Signal & UnoAPI return a custom-scheme URI we must render locally
+            // so we never embed the vendor's UI in an iframe (TZ §24).
+            <QrImage uri={state.uri} />
+          )}
           {state.ttlSeconds > 0 && (
             <p className="text-xs text-slate-400">
               QR дійсний {Math.round(state.ttlSeconds / 60)} хв. Після прострочення — система автоматично переведе endpoint у помилку.

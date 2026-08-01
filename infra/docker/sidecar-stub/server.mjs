@@ -208,12 +208,14 @@ function buildApp() {
     app.post('/app/devices', (req, res) => {
       const deviceId = String(req.body?.device_id ?? '').trim();
       if (!deviceId) return res.status(400).json({ error: 'device_id required' });
-      // gwmd is idempotent on create.
+      // gwmd is idempotent on create. We mirror the real gwmd service's
+      // capitalised field names (`ID`, `JID`, `State`) so the adapter's
+      // dev-mode probing sees the same shape it sees in prod.
       const existing = devices.get(deviceId);
       if (existing) {
         return res.json({ status: 200, code: 'SUCCESS', message: 'Device added', results: existing });
       }
-      const record = { id: deviceId, device_id: deviceId, jid: '', state: 'init' };
+      const record = { ID: deviceId, device_id: deviceId, JID: '', State: 'Disconnected' };
       devices.set(deviceId, record);
       res.json({ status: 200, code: 'SUCCESS', message: 'Device added', results: record });
     });
@@ -289,7 +291,8 @@ function buildApp() {
         return res.status(404).json({ status: 404, code: 'NOT_FOUND', message: 'device not found' });
       }
       d.is_logged_in = true;
-      d.jid = req.body?.jid ?? `${deviceId.replace(/[^0-9]/g, '')}@s.whatsapp.net`;
+      d.JID = req.body?.jid ?? `${deviceId.replace(/[^0-9]/g, '')}@s.whatsapp.net`;
+      d.State = 'LoggedIn';
       res.json({ status: 200, code: 'SUCCESS', message: 'paired', results: d });
     });
 
