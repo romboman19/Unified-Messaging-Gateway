@@ -1,0 +1,107 @@
+# Production override — replaces dev stubs for signal-cli and whatsapp with
+# the real vendor images (TZ §23/§24). The dbsms-vendor stub stays untouched:
+# the real DBLtek GoIP sidecar is shipped as a vendor archive (TZ §21,
+# ADR-003) and pinned out-of-band.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Persistent volumes `umg-signal-data`, `umg-gwmd-data` and
+# `umg-unoapi-data` are reused so existing linked-device keys / WhatsApp
+# session creds survive the switch.
+#
+# WhatsApp is split into two sidecars:
+#   - `gwmd`    (primary, MIT):  the wizard-driven QR pairing flow. Use this
+#                                for any new WhatsApp number.
+#   - `unoapi`  (legacy, GPL-3): kept so existing endpoints continue to work
+#                                after migration. Can be disabled later by
+#                                dropping the service block and removing the
+#                                UNOAPI_BASE_URL env var.
+#
+# TZ §1038 narrows UnoAPI: UnoAPI Cloud 2.x no longer returns QR codes via
+# JSON HTTP — pairing is mediated by a socket.io WebSocket only. gwmd gives
+# us a plain HTTP/JSON pairing flow that the wizard can drive end-to-end.
+
+services:
+  gwmd:
+    build: !reset null
+    image: aldinokemal/go-whatsapp-web-multidevice:latest
+    container_name: umg-gwmd
+    command:
+      - "--app-base-path=/app"
+      - "--port=3000"
+      - "--autoreply=Welcome to UMG."
+      # gwmd expects HTTP basic auth on its REST surface when WEBHOOK_USERNAME
+      # / WEBHOOK_PASSWORD are set. Configure here so the gwmd adapter's
+      # `Authorization` header lines up.
+      - "--basic-auth=$(GWMD_USERNAME):$(GWMD_PASSWORD)"
+    environment:
+      TZ: Europe/Kyiv
+      GWMD_USERNAME: ${GWMD_USERNAME:-umg}
+      GWMD_PASSWORD: ${GWMD_PASSWORD:?set in .env}
+      # Path under which gwmd persists whatsmeow session data; bind-mount
+      # the `umg-gwmd-data` volume so containers can be recreated without
+      # losing paired numbers.
+      WHATSAPP_DATA_PATH: /home/gwmd/whatsapp
+    volumes:
+      - umg-gwmd-data:/home/gwmd/whatsapp
+    networks:
+      - transports
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/health >/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+
+  unoapi:
+    build: !reset null
+    image: clairton/unoapi-cloud:2.11.7
+    container_name: umg-unoapi
+    environment:
+      TZ: Europe/Kyiv
+      # UnoAPI uses SQL Server by default; we point it at the embedded
+      # H2 default for dev-ish sizing. For real prod, set DATABASE_URL to
+      # a managed Postgres in ADR §23's runbook.
+      DATABASE_DRIVER: h2
+      DATABASE_URL: jdbc:h2:./data/unoapi;AUTO_SERVER=TRUE
+      # Disable outbound integrations not used by UMG.
+      WEBHOOK_TIMEOUT: 30000
+    volumes:
+      - umg-unoapi-data:/home/unoapi/data
+    networks:
+      - transports
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9876/ping >/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+
+  signal-cli:
+    build: !reset null
+    image: bbernhard/signal-cli-rest-api:0.100
+    container_name: umg-signal-cli
+    environment:
+      # signal-cli-rest-api runs in MODE=normal by default; json-rpc is
+      # lower-latency for high-throughput send. We keep json-rpc to match
+      # the dev-stub contract used by the worker (TZ §24).
+      MODE: json-rpc
+      AUTO_RECEIVE_SCHEDULE: "0 */1 * * * *"
+      # Persistence: keys live under /home/signal/.local/share/signal-cli
+      SIGNAL_DATA_PATH: /home/signal/data
+      # Use the sidecar's bundled Java; no extra JDK env needed.
+      JAVA_TOOL_OPTIONS: "-Xmx512m"
+    volumes:
+      - umg-signal-data:/home/signal/data
+    networks:
+      - transports
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/v1/health >/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
