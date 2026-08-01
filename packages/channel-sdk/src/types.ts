@@ -138,6 +138,8 @@ export interface AdapterCapabilities {
     reactions?: boolean;
     voice?: boolean;
     media?: boolean;
+    /** Provisioning mode (TZ §1038). Omit / `'none'` for physical-only. */
+    provisioning?: 'qr' | 'sms' | 'voice' | 'none';
   };
 }
 
