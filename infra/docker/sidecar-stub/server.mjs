@@ -12,8 +12,8 @@
 import express from 'express';
 
 const vendor = (process.env.STUB_VENDOR ?? '').toLowerCase();
-if (!['dbsms', 'unoapi', 'signal'].includes(vendor)) {
-  console.error(`STUB_VENDOR must be one of dbsms, unoapi, signal (got "${vendor}")`);
+if (!['dbsms', 'unoapi', 'signal', 'gwmd'].includes(vendor)) {
+  console.error(`STUB_VENDOR must be one of dbsms, unoapi, signal, gwmd (got "${vendor}")`);
   process.exit(2);
 }
 
@@ -182,6 +182,123 @@ function buildApp() {
 
     app.post('/v1/register/:number', (_req, res) => res.json({ ok: true }));
     app.post('/v1/register/:number/verify/:code', (_req, res) => res.json({ ok: true }));
+    app.post('/inbound-stub', (req, res) => res.json({ ok: true, body: req.body }));
+  }
+
+  // ─────────────── go-whatsapp-web-multidevice (TZ §1038) ─────────────
+  // gwmd is the canonical WhatsApp sidecar in production; in dev we mock
+  // its REST surface so the wizard flow can be exercised end-to-end without
+  // pulling the real Go binary (which would need a real phone to pair).
+  if (vendor === 'gwmd') {
+    // in-memory device store: deviceId → { device_id, jid, is_logged_in }
+    const devices = new Map();
+    // in-memory session store: deviceId → { qrToken, expiresAt }
+    const sessions = new Map();
+
+    app.get('/health', (_req, res) => res.json({ ok: true, vendor }));
+
+    // gwmd mounts REST under `/app`. We treat `/app` as an opaque prefix
+    // for the adapter — so dev callers go to `/app/devices` etc.
+    app.get('/app/devices', (_req, res) => {
+      const list = [];
+      for (const d of devices.values()) list.push(d);
+      res.json({ status: 200, code: 'SUCCESS', results: list });
+    });
+
+    app.post('/app/devices', (req, res) => {
+      const deviceId = String(req.body?.device_id ?? '').trim();
+      if (!deviceId) return res.status(400).json({ error: 'device_id required' });
+      // gwmd is idempotent on create.
+      const existing = devices.get(deviceId);
+      if (existing) {
+        return res.json({ status: 200, code: 'SUCCESS', message: 'Device added', results: existing });
+      }
+      const record = { id: deviceId, device_id: deviceId, jid: '', state: 'init' };
+      devices.set(deviceId, record);
+      res.json({ status: 200, code: 'SUCCESS', message: 'Device added', results: record });
+    });
+
+    app.get('/app/devices/:device_id/login', (req, res) => {
+      const deviceId = req.params.device_id;
+      if (!devices.has(deviceId)) {
+        return res.status(404).json({ status: 404, code: 'NOT_FOUND', message: 'device not found' });
+      }
+      const token = `gwmd-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+      sessions.set(deviceId, { qrToken: token, expiresAt: Date.now() + 60_000 });
+      // gwmd returns a URL the sidecar itself serves (not base64). In the
+      // stub we point at a data: URL with a placeholder SVG so the wizard
+      // gets a valid <img src> out of the box. Real sidecars render an
+      // actual QR PNG at this URL.
+      const qr_link =
+        `data:image/svg+xml;utf8,` +
+        encodeURIComponent(
+          `<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200">` +
+            `<rect width="100%" height="100%" fill="white"/>` +
+            `<text x="10" y="100" font-family="monospace" font-size="14" fill="black">` +
+              `STUB QR ${deviceId}\n${token}` +
+            `</text></svg>`,
+        );
+      res.json({
+        status: 200,
+        code: 'SUCCESS',
+        message: 'Login success',
+        results: {
+          device_id: deviceId,
+          qr_link,
+          qr_duration: 60,
+        },
+      });
+    });
+
+    app.get('/app/devices/:device_id/status', (req, res) => {
+      const deviceId = req.params.device_id;
+      const d = devices.get(deviceId);
+      if (!d) {
+        return res.status(404).json({
+          status: 404,
+          code: 'NOT_FOUND',
+          message: 'device not found',
+          results: { device_id: deviceId, is_connected: false, is_logged_in: false },
+        });
+      }
+      res.json({
+        status: 200,
+        code: 'SUCCESS',
+        message: 'Device status',
+        results: {
+          device_id: deviceId,
+          is_connected: true,
+          is_logged_in: !!d.is_logged_in,
+          jid: d.jid ?? '',
+        },
+      });
+    });
+
+    app.delete('/app/devices/:device_id', (req, res) => {
+      const deviceId = req.params.device_id;
+      devices.delete(deviceId);
+      sessions.delete(deviceId);
+      res.json({ status: 200, code: 'SUCCESS', message: 'Device deleted' });
+    });
+
+    // Dev-only: simulate the admin scanning the QR on their phone.
+    app.post('/app/devices/:device_id/_stub/connect', (req, res) => {
+      const deviceId = req.params.device_id;
+      const d = devices.get(deviceId);
+      if (!d) {
+        return res.status(404).json({ status: 404, code: 'NOT_FOUND', message: 'device not found' });
+      }
+      d.is_logged_in = true;
+      d.jid = req.body?.jid ?? `${deviceId.replace(/[^0-9]/g, '')}@s.whatsapp.net`;
+      res.json({ status: 200, code: 'SUCCESS', message: 'paired', results: d });
+    });
+
+    app.post('/app/send/:device_id', (req, res) => {
+      const externalId = `gwmd-msg-${Date.now()}`;
+      sharedSent.set(externalId, { device_id: req.params.device_id, body: req.body, status: 'sent' });
+      res.json({ status: 200, code: 'SUCCESS', results: { message_id: externalId } });
+    });
+
     app.post('/inbound-stub', (req, res) => res.json({ ok: true, body: req.body }));
   }
 

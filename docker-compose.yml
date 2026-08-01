@@ -51,6 +51,9 @@ services:
       DBSMS_PASSWORD: ${DBSMS_PASSWORD:-change-me}
       UNOAPI_BASE_URL: ${UNOAPI_BASE_URL:-http://unoapi:9876}
       UNOAPI_API_KEY: ${UNOAPI_API_KEY:-change-me}
+      GWMD_BASE_URL: ${GWMD_BASE_URL:-http://gwmd:3000}
+      GWMD_USERNAME: ${GWMD_USERNAME:-umg}
+      GWMD_PASSWORD: ${GWMD_PASSWORD:-change-me}
       SIGNAL_BASE_URL: ${SIGNAL_BASE_URL:-http://signal-cli:8080}
     volumes:
       - umg-media-data:/data/media
@@ -87,6 +90,9 @@ services:
       DBSMS_PASSWORD: ${DBSMS_PASSWORD:-change-me}
       UNOAPI_BASE_URL: ${UNOAPI_BASE_URL:-http://unoapi:9876}
       UNOAPI_API_KEY: ${UNOAPI_API_KEY:-change-me}
+      GWMD_BASE_URL: ${GWMD_BASE_URL:-http://gwmd:3000}
+      GWMD_USERNAME: ${GWMD_USERNAME:-umg}
+      GWMD_PASSWORD: ${GWMD_PASSWORD:-change-me}
       SIGNAL_BASE_URL: ${SIGNAL_BASE_URL:-http://signal-cli:8080}
     volumes:
       - umg-media-data:/data/media
@@ -136,7 +142,8 @@ services:
   # `infra/docker/Dockerfile.sidecar-stub`. Production deployments swap
   # these for the real vendor images:
   #   - bbernhard/signal-cli-rest-api (TZ §24 — Signal)
-  #   - clairton/unoapi-cloud        (TZ §23 — WhatsApp, GPL-3.0)
+  #   - aldinokemal/go-whatsapp-web-multidevice (TZ §23 — WhatsApp, MIT)
+  #   - clairton/unoapi-cloud (TZ §23 — WhatsApp, GPL-3.0, legacy)
   #   - DBLtek GoIP SMS Server v1.30.1 sidecar (TZ §21 — vendor archive,
   #     SHA-256-pinned locally, never committed).
   # Network `transports` is `internal: true` so the vendor containers
@@ -198,6 +205,25 @@ services:
       timeout: 5s
       retries: 5
 
+  gwmd:
+    build:
+      context: ./infra/docker
+      dockerfile: Dockerfile.sidecar-stub
+    container_name: umg-gwmd
+    environment:
+      STUB_VENDOR: gwmd
+      STUB_PORT: "3000"
+    volumes:
+      - umg-gwmd-data:/home/gwmd/data
+    networks:
+      - transports
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/health >/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
 networks:
   frontend:
     internal: false
@@ -216,3 +242,5 @@ volumes:
   umg-signal-data:
   # UnoAPI keeps WhatsApp session creds here (TZ §23).
   umg-unoapi-data:
+  # gwmd keeps WhatsApp whatsmeow session data here (TZ §23).
+  umg-gwmd-data:

@@ -4,11 +4,12 @@ import { ChannelType, PrismaClient } from '@umg/database';
 /**
  * Default transport accounts bootstrapped on API startup.
  *
- * The system owns these three adapters — they map 1:1 to the vendor
+ * The system owns these adapters — they map 1:1 to the vendor
  * sidecars on the `transports` network (TZ §21/§23/§24, ADR-002):
  *
  *   sms       ← goip-vendor        (DBLtek GoIP SMS Server v1.30.1)
- *   whatsapp  ← unoapi             (UnoAPI / WhatsApp Cloud API)
+ *   whatsapp  ← gwmd               (go-whatsapp-web-multidevice — primary)
+ *             ← unoapi             (UnoAPI Cloud — legacy, optional)
  *   signal    ← signal-cli-rest-api (bbernhard/signal-cli-rest-api)
  *
  * Per-channel credentials come from environment variables so production
@@ -52,6 +53,23 @@ export class TransportAccountsBootstrapService {
         config: {
           baseUrl: process.env.UNOAPI_BASE_URL,
           apiKey: process.env.UNOAPI_API_KEY ?? '',
+        },
+      });
+    }
+    if (process.env.GWMD_BASE_URL) {
+      // gwmd is the primary WhatsApp adapter as of TZ §1038 — UnoAPI Cloud
+      // 2.x no longer returns QR codes in a JSON HTTP response, so the
+      // wizard-driven pairing flow is only achievable via go-whatsapp-web-
+      // multidevice. We still keep UnoAPI seeding above for accounts that
+      // already have endpoints linked against it.
+      specs.push({
+        adapter: 'gwmd',
+        type: ChannelType.whatsapp,
+        name: 'WhatsApp / go-whatsapp-web-multidevice',
+        config: {
+          baseUrl: process.env.GWMD_BASE_URL,
+          username: process.env.GWMD_USERNAME ?? '',
+          password: process.env.GWMD_PASSWORD ?? '',
         },
       });
     }

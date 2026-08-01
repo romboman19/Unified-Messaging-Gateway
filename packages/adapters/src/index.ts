@@ -1,12 +1,14 @@
 import { ChannelAdapterRegistry, type ChannelAdapter } from '@umg/channel-sdk';
 import { SignalCliRestApiAdapter } from './signal/index.js';
 import { UnoApiAdapter } from './unoapi/index.js';
+import { GwmdAdapter } from './gwmd/index.js';
 import { GoipVendorAdapter } from './goip-vendor/index.js';
 import { MockAdapter } from './mock/index.js';
 
 export * from './mock/index.js';
 export * from './signal/index.js';
 export * from './unoapi/index.js';
+export * from './gwmd/index.js';
 export * from './goip-vendor/index.js';
 
 /**
@@ -18,6 +20,9 @@ export function registerBuiltinAdapters(
   registry.register('mock', () => new MockAdapter());
   registry.register('goip-vendor', () => new GoipVendorAdapter());
   registry.register('unoapi', () => new UnoApiAdapter());
+  // TZ §23 — go-whatsapp-web-multidevice replaces UnoAPI as the canonical
+  // WhatsApp sidecar because it exposes QR pairing over plain HTTP/JSON.
+  registry.register('gwmd', () => new GwmdAdapter());
   registry.register('signal-cli-rest-api', () => new SignalCliRestApiAdapter());
   return registry;
 }
