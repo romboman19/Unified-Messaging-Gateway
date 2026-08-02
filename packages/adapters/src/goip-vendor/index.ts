@@ -323,6 +323,69 @@ export class GoipVendorAdapter {
     }));
   }
 
+  /**
+   * Sends a USSD code from a specific SIM and returns the carrier's reply.
+   *
+   * This is the only way to read a prepaid balance: the SMS Server's own
+   * "Auto balance and recharge" scheme keeps `goip.bal` up to date, but it is
+   * configured in the vendor UI and exposed through no API. A USSD round-trip
+   * needs no configuration at all — the caller supplies the carrier's code.
+   *
+   * Unlike the JSON commands this is a GET on `en/ussd.php`, with credentials
+   * in the query string and the reply as plain text prefixed by "OK ".
+   */
+  async sendUssd(
+    account: AccountConfig,
+    line: string,
+    code: string,
+  ): Promise<{ ok: boolean; reply: string }> {
+    const { username, password } = this.auth(account);
+    const url =
+      `${this.baseUrl(account)}/goip/en/ussd.php` +
+      `?USERNAME=${encodeURIComponent(username)}` +
+      `&PASSWORD=${encodeURIComponent(password)}` +
+      `&TERMID=${encodeURIComponent(line)}` +
+      // "*" and "#" must be percent-encoded or the query string swallows them.
+      `&USSDMSG=${encodeURIComponent(code)}`;
+
+    const res = await fetch(url, { method: 'GET' });
+    const text = (await res.text()).trim();
+    if (!res.ok) {
+      return { ok: false, reply: `SMS Server returned ${res.status}` };
+    }
+    // Errors come back as plain text too, e.g. "ERROR Not find this TERM".
+    if (/^ERROR/i.test(text)) {
+      return { ok: false, reply: text };
+    }
+    return { ok: true, reply: text.replace(/^OK\s*/i, '') };
+  }
+
+  /**
+   * Reads a prepaid balance by USSD and pulls the amount out of the reply.
+   *
+   * Carriers answer in free-form text, so the amount is extracted heuristically
+   * and the raw reply is always returned alongside — an operator can read
+   * "Na rahunku 106.0 grn." even when no parser recognises it.
+   */
+  async checkBalance(
+    account: AccountConfig,
+    line: string,
+    ussdCode: string,
+  ): Promise<{ ok: boolean; amount: number | null; currency: string | null; reply: string }> {
+    const { ok, reply } = await this.sendUssd(account, line, ussdCode);
+    if (!ok) return { ok: false, amount: null, currency: null, reply };
+
+    // First number with an optional decimal part, plus a currency word if the
+    // carrier put one next to it.
+    const m = /(-?\d+(?:[.,]\d{1,2})?)\s*(grn|грн|uah|₴|usd|eur)?/i.exec(reply);
+    return {
+      ok: true,
+      amount: m ? Number(m[1].replace(',', '.')) : null,
+      currency: m?.[2] ? m[2].toLowerCase() : null,
+      reply,
+    };
+  }
+
   /** `querysms` — pull the current state of a previously accepted send. */
   async queryStatus(account: AccountConfig, externalId: string): Promise<CanonicalStatus | null> {
     const { data } = await this.call(account, 'querysms', { taskID: externalId });
