@@ -9,6 +9,7 @@ import {
 import type {
   AccountConfig,
   CanonicalInbound,
+  CanonicalStatus,
   ChannelAdapter,
   EndpointConfig,
 } from '@umg/channel-sdk';
@@ -86,6 +87,17 @@ export class InboundIngestService {
       configJson: (endpoint.configJson as Record<string, unknown>) ?? {},
     };
 
+    // Transports deliver status reports and inbound messages through the same
+    // callback. Ask the adapter for a status first: only a genuine report
+    // produces one, so a normal message falls straight through.
+    if (adapter.normalizeStatus) {
+      const status = adapter.normalizeStatus(accountConfig, raw);
+      if (status) {
+        await this.applyStatus(status, endpoint.id);
+        return 0;
+      }
+    }
+
     const canonical = adapter.normalizeInbound(accountConfig, endpointConfig, raw);
     if (canonical.length === 0) return 0;
 
@@ -111,6 +123,16 @@ export class InboundIngestService {
     if (accounts.length === 0) return null;
     const accountIds = accounts.map((a) => a.id);
 
+    // GoIP identifies the SIM by its line id ("G101"), which we store as the
+    // endpoint's externalId — the same slot gwmd uses for its device id.
+    const goipLine = typeof r['goip_line'] === 'string' ? r['goip_line'] : null;
+    if (goipLine) {
+      const byLine = await this.prisma.endpoint.findFirst({
+        where: { accountId: { in: accountIds }, externalId: goipLine },
+      });
+      if (byLine) return byLine;
+    }
+
     const sessionId = typeof r['session_id'] === 'string' ? r['session_id'] : null;
     if (sessionId) {
       const bySession = await this.prisma.endpoint.findFirst({
@@ -129,6 +151,50 @@ export class InboundIngestService {
       });
     }
     return null;
+  }
+
+  /**
+   * Applies a transport's delivery report to the message it refers to.
+   *
+   * Statuses only ever move forward: a late "sent" callback must not undo a
+   * "delivered" we already recorded, and vendors do re-send reports.
+   */
+  private async applyStatus(status: CanonicalStatus, endpointId: string): Promise<void> {
+    const message = await this.prisma.message.findFirst({
+      where: { endpointId, externalId: status.externalId, direction: MessageDirection.outbound },
+      select: { id: true, status: true },
+    });
+    if (!message) {
+      this.logger.warn(`Status for unknown message ${status.externalId}; ignoring`);
+      return;
+    }
+
+    const rank: Record<string, number> = {
+      queued: 1,
+      dispatching: 2,
+      accepted: 3,
+      sent: 4,
+      delivered: 5,
+      read: 6,
+    };
+    const next = status.status as MessageStatus;
+    if (
+      status.status !== 'failed' &&
+      (rank[next] ?? 0) <= (rank[message.status] ?? 0)
+    ) {
+      return;
+    }
+
+    await this.prisma.message.update({ where: { id: message.id }, data: { status: next } });
+    await this.prisma.messageStatusHistory.create({
+      data: {
+        messageId: message.id,
+        status: next,
+        source: 'transport',
+        payload: (status.rawPayload ?? {}) as never,
+      },
+    });
+    this.logger.log(`Message ${message.id} → ${next} (${status.externalId})`);
   }
 
   private async persist(

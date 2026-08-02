@@ -46,7 +46,7 @@ services:
       COOKIE_SECRET: ${COOKIE_SECRET}
       MEDIA_STORAGE_PATH: /data/media
       LOG_LEVEL: ${LOG_LEVEL:-info}
-      DBSMS_BASE_URL: ${DBSMS_BASE_URL:-http://dbsms-vendor:8080}
+      DBSMS_BASE_URL: ${DBSMS_BASE_URL:-http://dbsms-server}
       DBSMS_USERNAME: ${DBSMS_USERNAME:-admin}
       DBSMS_PASSWORD: ${DBSMS_PASSWORD:-change-me}
       UNOAPI_BASE_URL: ${UNOAPI_BASE_URL:-}
@@ -55,6 +55,7 @@ services:
       GWMD_USERNAME: ${GWMD_USERNAME:-umg}
       GWMD_PASSWORD: ${GWMD_PASSWORD:-change-me}
       GWMD_WEBHOOK_SECRET: ${GWMD_WEBHOOK_SECRET:-}
+      DBSMS_WEBHOOK_SECRET: ${DBSMS_WEBHOOK_SECRET:-}
       SIGNAL_BASE_URL: ${SIGNAL_BASE_URL:-http://signal-cli:8080}
     volumes:
       - umg-media-data:/data/media
@@ -86,7 +87,7 @@ services:
       REDIS_URL: redis://redis:6379
       LOG_LEVEL: ${LOG_LEVEL:-info}
       MEDIA_STORAGE_PATH: /data/media
-      DBSMS_BASE_URL: ${DBSMS_BASE_URL:-http://dbsms-vendor:8080}
+      DBSMS_BASE_URL: ${DBSMS_BASE_URL:-http://dbsms-server}
       DBSMS_USERNAME: ${DBSMS_USERNAME:-admin}
       DBSMS_PASSWORD: ${DBSMS_PASSWORD:-change-me}
       UNOAPI_BASE_URL: ${UNOAPI_BASE_URL:-}
@@ -95,6 +96,7 @@ services:
       GWMD_USERNAME: ${GWMD_USERNAME:-umg}
       GWMD_PASSWORD: ${GWMD_PASSWORD:-change-me}
       GWMD_WEBHOOK_SECRET: ${GWMD_WEBHOOK_SECRET:-}
+      DBSMS_WEBHOOK_SECRET: ${DBSMS_WEBHOOK_SECRET:-}
       SIGNAL_BASE_URL: ${SIGNAL_BASE_URL:-http://signal-cli:8080}
     volumes:
       - umg-media-data:/data/media

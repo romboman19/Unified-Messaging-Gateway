@@ -5,6 +5,7 @@ import {
   HttpCode,
   Logger,
   Post,
+  Query,
   Req,
   UnauthorizedException,
 } from '@nestjs/common';
@@ -57,6 +58,32 @@ export class InboundWebhooksController {
     }
 
     await this.queue.enqueueInbound('gwmd', body);
+    return { ok: true };
+  }
+
+  /**
+   * DBLtek GoIP SMS Server forwards inbound SMS to the URL set in its System
+   * Settings: `{ goip_line, from_number, content, recv_time }`.
+   *
+   * Unlike gwmd it signs nothing — the vendor offers no signature or token on
+   * this callback at all. The only thing protecting it is the network: the SMS
+   * Server sits on the internal `transports` network, so nothing off-host can
+   * reach this route. A shared secret in the query string is accepted when
+   * `DBSMS_WEBHOOK_SECRET` is set, since the forwarding URL is free-form and
+   * can carry one.
+   */
+  @Post('dbsms')
+  @HttpCode(200)
+  async dbsms(
+    @Query('secret') secret: string | undefined,
+    @Body() body: Record<string, unknown>,
+  ) {
+    const expected = process.env.DBSMS_WEBHOOK_SECRET ?? '';
+    if (expected && secret !== expected) {
+      this.logger.warn('Rejected dbsms webhook with a bad secret');
+      throw new UnauthorizedException('Bad secret.');
+    }
+    await this.queue.enqueueInbound('goip-vendor', body);
     return { ok: true };
   }
 
