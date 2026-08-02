@@ -86,6 +86,20 @@ else
   echo "[sms-server] database already has ${TABLES} table(s); leaving it alone"
 fi
 
+# Where the server posts inbound SMS and delivery reports. The vendor stores
+# this in its own settings table and offers no API for it, so a fresh install
+# would otherwise need someone to paste the URL into the web UI by hand — and
+# inbound SMS would silently go nowhere until they did. Written on every start
+# so rotating the webhook secret takes effect without touching the vendor UI.
+if [ -n "${SMS_FORWARD_URL:-}" ]; then
+  mysql -h "$DB_HOST" -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" \
+    -e "UPDATE system SET json_recv_url='${SMS_FORWARD_URL}', json_send_url='${SMS_FORWARD_URL}';" \
+    && echo "[sms-server] forwarding URLs set to ${SMS_FORWARD_URL%%\?*}?secret=***" \
+    || echo "[sms-server] WARNING: could not set forwarding URLs" >&2
+else
+  echo "[sms-server] SMS_FORWARD_URL not set — inbound SMS will not reach UMG" >&2
+fi
+
 # goipcron is the piece GoIP hardware actually talks to over UDP. Apache serves
 # the UI and the JSON API; if the daemon dies the gateway silently goes offline,
 # so take the container down with it rather than look healthy while deaf.

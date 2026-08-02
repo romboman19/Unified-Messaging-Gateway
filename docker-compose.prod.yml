@@ -167,6 +167,7 @@ services:
       # its grants, which the application user cannot do.
       SMS_DB_ROOT_PASSWORD: ${SMS_DB_ROOT_PASSWORD:?set in .env}
       SMS_GOIPCRON_PORT: "44444"
+      SMS_FORWARD_URL: ${SMS_FORWARD_URL:-}
       TZ: Europe/Kyiv
     ports:
       # Vendor web UI — the admin adds the GoIP and its lines here.
