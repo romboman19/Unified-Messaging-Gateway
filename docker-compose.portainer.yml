@@ -65,6 +65,7 @@ services:
         condition: service_healthy
         required: true
     environment:
+      DBSMS_WEBHOOK_SECRET: ${DBSMS_WEBHOOK_SECRET:?set in .env}
       SMS_DB_HOST: dbsms-db
       SMS_DB_NAME: ${SMS_DB_NAME:-goip}
       SMS_DB_PASSWORD: ${SMS_DB_PASSWORD:?set in .env}
@@ -73,6 +74,7 @@ services:
       SMS_FORWARD_URL: ${SMS_FORWARD_URL:-}
       SMS_GOIPCRON_PORT: "44444"
       TZ: Europe/Kyiv
+      UMG_API_URL: ${UMG_API_URL:-http://umg-api:4000}
     healthcheck:
       interval: 15s
       retries: 10

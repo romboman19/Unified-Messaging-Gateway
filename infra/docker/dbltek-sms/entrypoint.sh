@@ -91,6 +91,17 @@ fi
 # would otherwise need someone to paste the URL into the web UI by hand — and
 # inbound SMS would silently go nowhere until they did. Written on every start
 # so rotating the webhook secret takes effect without touching the vendor UI.
+# Compose the URL here rather than expecting a ready-made one. A pre-built
+# value invites two silent failures: deployment UIs (Portainer's stack
+# variables, for one) do not expand ${VAR} *inside* another variable's value,
+# so the secret arrives as a literal placeholder; and a secret containing "+"
+# is decoded as a space on the receiving side, so it never matches. Building it
+# from the raw secret, URL-encoded, removes both.
+if [ -z "${SMS_FORWARD_URL:-}" ] && [ -n "${DBSMS_WEBHOOK_SECRET:-}" ]; then
+  ENCODED_SECRET=$(php -r 'echo rawurlencode(getenv("DBSMS_WEBHOOK_SECRET"));')
+  SMS_FORWARD_URL="${UMG_API_URL:-http://umg-api:4000}/api/v1/webhooks/dbsms?secret=${ENCODED_SECRET}"
+fi
+
 if [ -n "${SMS_FORWARD_URL:-}" ]; then
   mysql -h "$DB_HOST" -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" \
     -e "UPDATE system SET json_recv_url='${SMS_FORWARD_URL}', json_send_url='${SMS_FORWARD_URL}';" \
