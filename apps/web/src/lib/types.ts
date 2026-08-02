@@ -94,6 +94,16 @@ export interface Endpoint {
   phoneE164: string | null;
   phoneRaw: string | null;
   enabled: boolean;
+  /** Free-form per-endpoint settings; carries SIM balance state for SMS. */
+  configJson?: {
+    balanceUssd?: string;
+    lowBalanceThreshold?: number;
+    balance?: number | null;
+    balanceCurrency?: string | null;
+    balanceReply?: string;
+    balanceCheckedAt?: string;
+    [k: string]: unknown;
+  };
   registrationState?: RegistrationState;
   deviceName?: string | null;
   uuid?: string | null;

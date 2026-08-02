@@ -4,6 +4,7 @@ import { PrismaClient } from '@umg/database';
 import type { AccountConfig } from '@umg/channel-sdk';
 import { AdaptersRegistry } from '../adapters/adapters.registry';
 import { AlertsService } from '../alerts/alerts.service';
+import { EventsService } from '../events/events.service';
 
 const SMS_ADAPTER = 'goip-vendor';
 
@@ -31,6 +32,7 @@ export class SmsBalanceScheduler {
     @Inject('PRISMA') private readonly prisma: PrismaClient,
     private readonly adapters: AdaptersRegistry,
     private readonly alerts: AlertsService,
+    private readonly events: EventsService,
   ) {}
 
   @Cron(CronExpression.EVERY_DAY_AT_6AM)
@@ -75,6 +77,11 @@ export class SmsBalanceScheduler {
 
         if (!result.ok) {
           this.logger.warn(`Balance check failed for ${line}: ${result.reply}`);
+          await this.emit('sim.ussd.failed', account.id, endpoint.id, {
+            line,
+            phone: endpoint.phoneE164,
+            error: result.reply,
+          });
           continue;
         }
         this.logger.log(
@@ -99,7 +106,41 @@ export class SmsBalanceScheduler {
           typeof cfg['lowBalanceThreshold'] === 'number'
             ? (cfg['lowBalanceThreshold'] as number)
             : DEFAULT_LOW_BALANCE;
+
+        // Every successful reading is routable, so a CRM can track balances
+        // without polling us.
+        await this.emit('sim.balance.updated', account.id, endpoint.id, {
+          line,
+          phone: endpoint.phoneE164,
+          amount: result.amount,
+          currency: result.currency,
+          threshold,
+          reply: result.reply,
+        });
+
+        // A recovery is worth its own event: whoever was told about the low
+        // balance needs telling when it is no longer low.
+        const wasLow = cfg['balance'] !== undefined && Number(cfg['balance']) < threshold;
+        if (wasLow && result.amount >= threshold) {
+          await this.emit('sim.balance.recovered', account.id, endpoint.id, {
+            line,
+            phone: endpoint.phoneE164,
+            amount: result.amount,
+            currency: result.currency,
+            threshold,
+          });
+        }
+
         if (result.amount < threshold) {
+          await this.emit('sim.balance.low', account.id, endpoint.id, {
+            line,
+            phone: endpoint.phoneE164,
+            amount: result.amount,
+            currency: result.currency,
+            threshold,
+            inDebt: result.amount < 0,
+            reply: result.reply,
+          });
           const inDebt = result.amount < 0;
           await this.alerts.raise({
             fingerprint: `sms.balance.low:${endpoint.id}`,
@@ -121,6 +162,32 @@ export class SmsBalanceScheduler {
       } catch (err) {
         this.logger.error(`Balance check for ${line} threw: ${(err as Error).message}`);
       }
+    }
+  }
+
+  /**
+   * Emits a routable event. Alerts show up in the UI; events are what routing
+   * rules can forward to a webhook, so a low balance reaches the CRM without
+   * anyone watching the alerts page.
+   */
+  private async emit(
+    type: string,
+    accountId: string,
+    endpointId: string,
+    data: Record<string, unknown>,
+  ): Promise<void> {
+    try {
+      await this.events.emit({
+        type,
+        aggregateId: endpointId,
+        channel: 'sms' as never,
+        accountId,
+        endpointId,
+        data: { sim: data },
+      });
+    } catch (err) {
+      // A failed event must not lose the balance reading itself.
+      this.logger.error(`Could not emit ${type}: ${(err as Error).message}`);
     }
   }
 

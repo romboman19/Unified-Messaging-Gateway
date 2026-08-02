@@ -9,11 +9,12 @@ import {
   Unlink,
 } from 'lucide-react';
 import type {
+  Endpoint,
   RegistrationState,
   TransportAccount,
 } from '../lib/types';
 import { ProvisioningWizard } from '../components/ProvisioningWizard';
-import { apiError } from '../lib/format';
+import { apiError, formatDate } from '../lib/format';
 
 type EndpointDraft = {
   label: string;
@@ -48,6 +49,8 @@ export default function ChannelsPage() {
   const [error, setError] = useState('');
   const [drafts, setDrafts] = useState<Record<string, EndpointDraft>>({});
   const [wizardFor, setWizardFor] = useState<TransportAccount | null>(null);
+  const [balanceBusy, setBalanceBusy] = useState<string | null>(null);
+  const [balanceEditing, setBalanceEditing] = useState<string | null>(null);
 
   async function fetchAccounts() {
     try {
@@ -95,6 +98,36 @@ export default function ChannelsPage() {
         err?.response?.data?.message?.toString() ||
           'Не вдалося додати endpoint. Перевірте номер і спробуйте ще раз.',
       );
+    }
+  }
+
+  async function checkBalance(ep: Endpoint) {
+    setBalanceBusy(ep.id);
+    setError('');
+    try {
+      await api.post(`/endpoints/${ep.id}/balance`);
+      await fetchAccounts();
+    } catch (err) {
+      setError(apiError(err, 'Не вдалося перевірити баланс.'));
+    } finally {
+      setBalanceBusy(null);
+    }
+  }
+
+  async function saveBalanceSettings(ep: Endpoint, ussd: string, threshold: string) {
+    setError('');
+    try {
+      await api.patch(`/endpoints/${ep.id}`, {
+        config: {
+          ...(ep.configJson ?? {}),
+          balanceUssd: ussd.trim(),
+          lowBalanceThreshold: Number(threshold) || 0,
+        },
+      });
+      await fetchAccounts();
+      setBalanceEditing(null);
+    } catch (err) {
+      setError(apiError(err, 'Не вдалося зберегти налаштування балансу.'));
     }
   }
 
@@ -227,9 +260,9 @@ export default function ChannelsPage() {
                         ep.registrationState ?? 'unpaired';
                       const badge = registrationBadge[regState];
                       return (
+                        <div key={ep.id} className="rounded border p-2">
                         <div
-                          key={ep.id}
-                          className="flex items-center justify-between rounded border p-2"
+                          className="flex items-center justify-between"
                         >
                           <div className="text-sm">
                             <span className="font-medium">{ep.label}</span>
@@ -292,6 +325,18 @@ export default function ChannelsPage() {
                               <Trash2 size={14} />
                             </button>
                           </div>
+                        </div>
+                        {acc.type === 'sms' && (
+                          <BalanceCell
+                            ep={ep}
+                            busy={balanceBusy === ep.id}
+                            editing={balanceEditing === ep.id}
+                            onCheck={() => checkBalance(ep)}
+                            onEdit={() => setBalanceEditing(ep.id)}
+                            onCancel={() => setBalanceEditing(null)}
+                            onSave={(u, t) => saveBalanceSettings(ep, u, t)}
+                          />
+                        )}
                         </div>
                       );
                     })}
@@ -357,6 +402,107 @@ export default function ChannelsPage() {
           }}
         />
       )}
+    </div>
+  );
+}
+/**
+ * Balance for one SIM: the last reading, when it was taken, and the controls
+ * to take a new one or change the USSD code.
+ *
+ * A negative amount is a debt — carriers report it as a positive number next
+ * to the word "заборгованість", so showing the sign is the only way an admin
+ * can tell 48 owed from 48 available.
+ */
+function BalanceCell({
+  ep,
+  busy,
+  editing,
+  onCheck,
+  onEdit,
+  onCancel,
+  onSave,
+}: {
+  ep: Endpoint;
+  busy: boolean;
+  editing: boolean;
+  onCheck: () => void;
+  onEdit: () => void;
+  onCancel: () => void;
+  onSave: (ussd: string, threshold: string) => void;
+}) {
+  const cfg = ep.configJson ?? {};
+  const [ussd, setUssd] = useState(cfg.balanceUssd ?? '');
+  const [threshold, setThreshold] = useState(String(cfg.lowBalanceThreshold ?? 20));
+
+  const amount = typeof cfg.balance === 'number' ? cfg.balance : null;
+  const limit = typeof cfg.lowBalanceThreshold === 'number' ? cfg.lowBalanceThreshold : 20;
+  const low = amount !== null && amount < limit;
+
+  if (editing) {
+    return (
+      <div className="mt-2 flex flex-wrap items-center gap-2 rounded bg-slate-50 p-2 text-xs">
+        <label className="text-slate-500">USSD-код</label>
+        <input
+          className="w-28 rounded border p-1"
+          value={ussd}
+          onChange={(e) => setUssd(e.target.value)}
+          placeholder="*111#"
+        />
+        <label className="text-slate-500">поріг</label>
+        <input
+          className="w-16 rounded border p-1"
+          value={threshold}
+          onChange={(e) => setThreshold(e.target.value)}
+        />
+        <button
+          onClick={() => onSave(ussd, threshold)}
+          className="rounded bg-blue-600 px-2 py-1 text-white hover:bg-blue-700"
+        >
+          Зберегти
+        </button>
+        <button onClick={onCancel} className="rounded border px-2 py-1 hover:bg-slate-100">
+          Скасувати
+        </button>
+        <span className="text-slate-400">
+          Київстар *111#, Vodafone *101#, Vodafone контракт *110*10#, lifecell *103#
+        </span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-1 flex flex-wrap items-center gap-2 text-xs">
+      <span className="text-slate-500">Баланс:</span>
+      {amount === null ? (
+        <span className="text-slate-400">невідомий</span>
+      ) : (
+        <span
+          className={`rounded px-1.5 py-0.5 font-medium ${
+            amount < 0
+              ? 'bg-red-100 text-red-700'
+              : low
+                ? 'bg-amber-100 text-amber-700'
+                : 'bg-green-100 text-green-700'
+          }`}
+          title={cfg.balanceReply ?? ''}
+        >
+          {amount} {cfg.balanceCurrency ?? ''}
+          {amount < 0 ? ' (борг)' : ''}
+        </span>
+      )}
+      {cfg.balanceCheckedAt && (
+        <span className="text-slate-400">{formatDate(cfg.balanceCheckedAt)}</span>
+      )}
+      <button
+        onClick={onCheck}
+        disabled={busy}
+        className="rounded border px-2 py-0.5 hover:bg-slate-100 disabled:opacity-50"
+      >
+        {busy ? 'Перевіряю…' : 'Перевірити'}
+      </button>
+      <button onClick={onEdit} className="text-blue-600 hover:underline">
+        {cfg.balanceUssd ? `код ${cfg.balanceUssd}` : 'задати код'}
+      </button>
     </div>
   );
 }
