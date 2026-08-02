@@ -7,6 +7,7 @@ import { MessageSendProcessor } from './processors/message-send.processor';
 import { WebhookDeliverProcessor } from './processors/webhook-deliver.processor';
 import { InboundIngestProcessor, INBOUND_INGEST_QUEUE } from './processors/inbound-ingest.processor';
 import { InboundIngestService } from './inbound/inbound-ingest.service';
+import { InboundMediaService } from './inbound/inbound-media.service';
 import { SignalReceiveBridge } from './inbound/signal-receive.bridge';
 import { AdaptersRegistry, AdaptersFacade } from './adapters/adapters.registry';
 import { MockAdapter } from './adapters/mock.adapter';
@@ -39,6 +40,7 @@ import { ReconciliationScheduler } from './schedulers/reconciliation.scheduler';
     WebhookDeliverProcessor,
     InboundIngestProcessor,
     InboundIngestService,
+    InboundMediaService,
     SignalReceiveBridge,
     ScheduledSendScheduler,
     OutboxDispatcherScheduler,

@@ -11,6 +11,8 @@ import type {
   EndpointConfig,
   SendResult,
 } from '@umg/channel-sdk';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { AdaptersRegistry } from '../adapters/adapters.registry';
 import { EventsService } from '../events/events.service';
 import { AlertsService } from '../alerts/alerts.service';
@@ -32,6 +34,37 @@ export class MessageSendProcessor extends WorkerHost {
     private readonly alertsService: AlertsService,
   ) {
     super();
+  }
+
+  /**
+   * Reads this message's stored attachments off disk. A file that has gone
+   * missing is skipped rather than failing the send: delivering the text
+   * beats delivering nothing.
+   */
+  private async loadAttachments(messageId: string) {
+    const rows = await this.prisma.attachment.findMany({
+      where: { messageId, deletedAt: null },
+    });
+    if (rows.length === 0) return undefined;
+
+    const baseDir = process.env.MEDIA_STORAGE_PATH || '/data/media';
+    const out: Array<{ data: Uint8Array; mime: string; filename: string; size: number }> = [];
+    for (const row of rows) {
+      try {
+        const data = await readFile(join(baseDir, row.storagePath));
+        out.push({
+          data: new Uint8Array(data),
+          mime: row.mimeType,
+          filename: row.fileName,
+          size: row.sizeBytes,
+        });
+      } catch (err) {
+        this.logger.error(
+          `Attachment ${row.id} missing from storage (${row.storagePath}): ${(err as Error).message}`,
+        );
+      }
+    }
+    return out.length > 0 ? out : undefined;
   }
 
   private async emitMessageEvent(
@@ -150,7 +183,13 @@ export class MessageSendProcessor extends WorkerHost {
           },
         ],
         type: ((message as any).type ?? 'text') as CanonicalMessageType,
-        content: { text: bodyText } as CanonicalContent,
+        content: {
+          text: bodyText,
+          // Attachments were only ever linked to the message row; nothing read
+          // them back, so media never reached the transport at all. Load the
+          // bytes here so each adapter can encode them its own way.
+          attachments: await this.loadAttachments(message.id),
+        } as CanonicalContent,
       };
 
       const result: SendResult = await adapter.send(outbound, endpointConfig, accountConfig);
