@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { MessageSquare, Send, Plus, AlertCircle } from 'lucide-react';
+import { MessageSquare, Send, Plus, AlertCircle, Paperclip } from 'lucide-react';
 import { api } from '../hooks/useAuth';
 import { Conversation, ListResponse, Message, TransportAccount } from '../lib/types';
 import { Badge, CHANNEL_LABEL, MESSAGE_STATUS_LABEL } from '../components/ui';
@@ -8,6 +8,13 @@ import { apiError, formatDate, formatTime } from '../lib/format';
 
 /** Channels the admin can pick from, in the order they appear in the picker. */
 const CHANNELS = ['signal', 'whatsapp', 'sms', 'mock'] as const;
+
+/** Human-friendly file size for attachment labels. */
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} Б`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} КБ`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} МБ`;
+}
 
 /**
  * Turns an adapter's canonical failure code into something an admin can act
@@ -37,6 +44,8 @@ export default function TestChatPage() {
   const [endpointId, setEndpointId] = useState('');
   const [to, setTo] = useState('');
   const [sendError, setSendError] = useState('');
+  const [file, setFile] = useState<File | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   const conversations = useQuery({
@@ -91,19 +100,43 @@ export default function TestChatPage() {
       const account =
         channelEndpoints.find((e) => e.id === endpointId)?.account ??
         activeAccounts.find((a) => a.type === channel);
+
+      // Upload first: the send call references stored attachments by id, and
+      // the worker reads their bytes back out of storage at dispatch time.
+      let attachments: string[] | undefined;
+      let type = 'text';
+      if (file) {
+        const form = new FormData();
+        form.append('file', file);
+        const uploaded = await api.post<{ id: string }>('/media', form, {
+          // The axios instance defaults to application/json. Clearing it lets
+          // the browser set multipart/form-data *with* its boundary, without
+          // which the server cannot parse the upload.
+          headers: { 'Content-Type': undefined },
+        });
+        attachments = [uploaded.data.id];
+        type = file.type.startsWith('image/') ? 'image'
+          : file.type.startsWith('video/') ? 'video'
+          : file.type.startsWith('audio/') ? 'audio'
+          : 'document';
+      }
+
       return (
         await api.post('/messages/ui-send', {
           channel,
           accountId: account?.id,
           endpointId: endpointId || undefined,
           to,
-          type: 'text',
+          type,
           content: { text },
+          attachments,
         })
       ).data;
     },
     onSuccess: () => {
       setText('');
+      setFile(null);
+      if (fileInputRef.current) fileInputRef.current.value = '';
       setSendError('');
       // A brand-new chat has no conversation row until the send lands, so
       // refresh the list and let the admin pick it up there.
@@ -139,7 +172,7 @@ export default function TestChatPage() {
     setSendError('');
   }
 
-  const canSend = !!text.trim() && !!to.trim() && !!channel && !send.isPending;
+  const canSend = (!!text.trim() || !!file) && !!to.trim() && !!channel && !send.isPending;
 
   const composer = (
     <div className="border-t p-3">
@@ -183,6 +216,24 @@ export default function TestChatPage() {
           onChange={(e) => setTo(e.target.value)}
         />
       </div>
+      {file && (
+        <div className="mb-2 flex items-center gap-2 rounded bg-slate-100 px-2 py-1 text-xs">
+          <Paperclip size={14} />
+          <span className="flex-1 truncate">
+            {file.name} ({formatBytes(file.size)})
+          </span>
+          <button
+            type="button"
+            onClick={() => {
+              setFile(null);
+              if (fileInputRef.current) fileInputRef.current.value = '';
+            }}
+            className="text-red-600 hover:underline"
+          >
+            прибрати
+          </button>
+        </div>
+      )}
       <form
         onSubmit={(e) => {
           e.preventDefault();
@@ -192,8 +243,22 @@ export default function TestChatPage() {
         className="flex gap-2"
       >
         <input
+          ref={fileInputRef}
+          type="file"
+          className="hidden"
+          onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+        />
+        <button
+          type="button"
+          onClick={() => fileInputRef.current?.click()}
+          className="rounded border px-3 hover:bg-slate-100"
+          title="Прикріпити файл"
+        >
+          <Paperclip size={16} />
+        </button>
+        <input
           className="flex-1 rounded border p-2 text-sm"
-          placeholder="Текст повідомлення…"
+          placeholder={file ? 'Підпис до файлу (необовʼязково)…' : 'Текст повідомлення…'}
           value={text}
           onChange={(e) => setText(e.target.value)}
         />
@@ -362,9 +427,34 @@ export default function TestChatPage() {
                             : 'bg-slate-100 text-slate-800'
                         }`}
                       >
-                        <div className="whitespace-pre-wrap">
-                          {m.contentJson?.text || `[${m.messageType}]`}
-                        </div>
+                        {m.attachments?.map((att) => (
+                          <a
+                            key={att.id}
+                            href={`/api/v1/media/${att.id}`}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="mb-1 block"
+                            title={`${att.fileName} · ${formatBytes(att.sizeBytes)}`}
+                          >
+                            {att.mimeType.startsWith('image/') ? (
+                              <img
+                                src={`/api/v1/media/${att.id}`}
+                                alt={att.fileName}
+                                className="max-h-64 rounded"
+                              />
+                            ) : (
+                              <span className="flex items-center gap-1 underline">
+                                <Paperclip size={14} />
+                                {att.fileName} ({formatBytes(att.sizeBytes)})
+                              </span>
+                            )}
+                          </a>
+                        ))}
+                        {(m.contentJson?.text || !m.attachments?.length) && (
+                          <div className="whitespace-pre-wrap">
+                            {m.contentJson?.text || `[${m.messageType}]`}
+                          </div>
+                        )}
                         <div
                           className={`mt-1 flex items-center justify-end gap-2 text-xs ${
                             m.direction === 'outbound' ? 'text-blue-100' : 'text-slate-400'
