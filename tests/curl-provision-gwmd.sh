@@ -42,19 +42,29 @@ RES=$(curl -sS -b "$COOKIES" -X POST "$BASE/api/v1/transport-accounts/$ACCT_ID/p
   -d "{\"kind\":\"whatsapp\",\"label\":\"E2E gwmd\",\"phoneE164\":\"$PHONE\"}")
 echo "  response: $RES"
 EP_ID=$(echo "$RES" | jq -r '.endpointId')
-URI=$(echo "$RES" | jq -r '.uri')
+QR_PATH=$(echo "$RES" | jq -r '.qrImageUrl')
 
-echo "── 4. Verify URI shape (gwmd returns qr_link as URL or data: URL) ──"
-case "$URI" in
-  data:*|https://*|http://*) echo "  OK — $URI" ;;
-  *) echo "FAIL: URI shape wrong: $URI" >&2; exit 1 ;;
+echo "── 4. Verify the API returns a proxy path, not the sidecar's own URL ──"
+# gwmd builds qr_link from its request Host (http://gwmd:3000/...), which the
+# admin's browser cannot resolve — `transports` is an internal network. The
+# API must hand back its own proxy route instead.
+case "$QR_PATH" in
+  /transport-accounts/*/provision/*/qr.png) echo "  OK — $QR_PATH" ;;
+  *) echo "FAIL: expected a qr.png proxy path, got: $QR_PATH" >&2; exit 1 ;;
+esac
+
+echo "── 4b. Verify the proxy actually serves an image ──"
+CT=$(curl -sS -b "$COOKIES" -o /dev/null -w '%{content_type}' "$BASE/api/v1$QR_PATH")
+case "$CT" in
+  image/*) echo "  OK — content-type: $CT" ;;
+  *) echo "FAIL: qr.png proxy returned content-type '$CT'" >&2; exit 1 ;;
 esac
 
 echo "── 5. Simulate phone scan via dev-only stub hook ──"
-# gwmd's adapter used the phone (with `+`) as the device_id; replay that
-# exact id against the stub's _stub/connect so the sidecar sets JID and
-# the poll matcher can pick the row up.
-DEVICE_ID=$(printf '%s' "$PHONE" | jq -sRr @uri)
+# The gwmd adapter strips the phone down to digits for the device id — a "+"
+# survives the JSON create body but not the undecoded login path segment, and
+# the mismatch used to create two devices. Replay that same id here.
+DEVICE_ID=$(printf '%s' "$PHONE" | tr -cd '0-9')
 if curl -sS -m 2 -o /dev/null "$STUB_BASE/health" 2>/dev/null; then
   curl -sS -X POST "$STUB_BASE/app/devices/$DEVICE_ID/_stub/connect" \
     -H 'content-type: application/json' -d '{}'
