@@ -40,11 +40,18 @@ export interface ProvisionQrResult {
    */
   sessionId: string;
   /**
-   * URI the QR encodes. For Signal this is a `signalcaptcha://...` URI;
+   * URI the QR encodes. For Signal this is an `sgnl://linkdevice?...` URI;
    * the web UI re-renders it through an inline QR generator so we never
    * render an iframe to the vendor's UI (TZ §24).
    */
   uri: string;
+  /**
+   * Set when the sidecar renders the QR itself and returns an image URL
+   * rather than an encodable URI (gwmd). That URL resolves only from inside
+   * the API container — the `transports` network is `internal: true` — so
+   * the API proxies the bytes instead of handing the URL to the browser.
+   */
+  imageUrl?: string;
   /** TTL in seconds — after this the URI expires and a new QR is needed. */
   ttlSeconds: number;
 }

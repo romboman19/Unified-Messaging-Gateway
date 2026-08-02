@@ -35,7 +35,14 @@ import {
  *                                 normalise).
  *   POST /v1/register/:number   — registration (voice/sms/captcha)
  *   POST /v1/register/:number/verify/:code
- *   GET  /v1/qrcodelink?device_name=...
+ *   GET  /v1/qrcodelink/raw?device_name=...
+ *
+ * NOTE on the QR endpoint: `GET /v1/qrcodelink` renders the link URI to a
+ * PNG and responds with `image/png` — it is NOT a JSON endpoint. The JSON
+ * sibling is `/v1/qrcodelink/raw`, which returns
+ * `{ "device_link_uri": "sgnl://linkdevice?uuid=…&pub_key=…" }`. We use the
+ * raw variant and render the QR ourselves in the browser (TZ §24 — never
+ * embed the vendor's UI).
  */
 export class SignalCliRestApiAdapter {
   readonly name = 'signal-cli-rest-api';
@@ -139,6 +146,24 @@ export class SignalCliRestApiAdapter {
       if (!res.ok) {
         // Map transport detail to canonical error (rule #1 of the contract).
         const retryable = res.status >= 500 || res.status === 429;
+        // signal-cli knows exactly why a send failed — its json-rpc reply
+        // carries `results[].type`, e.g. UNREGISTERED_FAILURE — but the REST
+        // wrapper collapses all of it to "Failed to send message". Ask the
+        // registration lookup instead so the admin gets a reason rather than a
+        // shrug. Only on the failure path, so successful sends pay nothing.
+        const unregistered = await this.findUnregistered(account, number, recipients);
+        if (unregistered.length > 0) {
+          return {
+            externalId: null,
+            accepted: false,
+            rawResponse: raw,
+            error: {
+              code: 'RECIPIENT_NOT_REGISTERED',
+              message: `Не зареєстровані в Signal: ${unregistered.join(', ')}`,
+              retryable: false,
+            },
+          };
+        }
         return {
           externalId: null,
           accepted: false,
@@ -150,9 +175,27 @@ export class SignalCliRestApiAdapter {
           },
         };
       }
-      // Sidecar returns `{ "results": { "timestamp": <ms>, ... } }` — the
-      // canonical external id is the timestamp.
-      const ts = raw?.results?.[recipients[0]]?.timestamp ?? raw?.timestamp;
+      // The real sidecar answers 201 with an ARRAY of
+      // `{ timestamp, errors? }` (datastructs.SendMessageResponse), one entry
+      // per recipient. The timestamp doubles as Signal's message id, so it is
+      // our external id. Older shapes are still accepted for the dev stub.
+      const first = Array.isArray(raw) ? raw[0] : null;
+      if (first?.errors) {
+        return {
+          externalId: null,
+          accepted: false,
+          rawResponse: raw,
+          error: {
+            code: 'SIGNAL_SEND_ERROR',
+            message: JSON.stringify(first.errors),
+            retryable: false,
+          },
+        };
+      }
+      const ts =
+        first?.timestamp ??
+        raw?.results?.[recipients[0]]?.timestamp ??
+        raw?.timestamp;
       const externalId = ts ? String(ts) : null;
       if (externalId) this.recentSends.set(outbound.idempotencyKey, externalId);
       return { externalId, accepted: true, rawResponse: raw };
@@ -167,6 +210,35 @@ export class SignalCliRestApiAdapter {
           retryable: true,
         },
       };
+    }
+  }
+
+  /**
+   * `GET /v1/search/{account}?numbers=…` asks Signal's discovery service which
+   * of the numbers actually have a Signal account. Returns the ones that do
+   * not. Never throws: this only ever runs to enrich an error message, and a
+   * failed lookup must not mask the original send failure.
+   */
+  private async findUnregistered(
+    account: AccountConfig,
+    fromNumber: string,
+    recipients: string[],
+  ): Promise<string[]> {
+    try {
+      const query = recipients.map((r) => encodeURIComponent(r)).join(',');
+      const url = `${this.baseUrl(account)}/v1/search/${encodeURIComponent(
+        fromNumber,
+      )}?numbers=${query}`;
+      const res = await fetch(url, { method: 'GET' });
+      if (!res.ok) return [];
+      const body: any = await res.json().catch(() => []);
+      if (!Array.isArray(body)) return [];
+      return body
+        .filter((entry: any) => entry?.registered === false)
+        .map((entry: any) => String(entry?.number ?? ''))
+        .filter(Boolean);
+    } catch {
+      return [];
     }
   }
 
@@ -228,11 +300,16 @@ export class SignalCliRestApiAdapter {
   // ─── Provisioning (TZ §1038) — Signal linked-device via QR ────────────
 
   /**
-   * Signal linked-device wizard — `GET /v1/qrcodelink?device_name=...`
+   * Signal linked-device wizard — `GET /v1/qrcodelink/raw?device_name=...`
    *
-   * The phone is NOT supplied by the caller; the sidecar returns it after
-   * the user scans the QR with their Signal mobile app. We persist the
-   * deviceName as `sessionId` so subsequent polls can correlate.
+   * The sidecar calls signal-cli's `startLink`, hands us back the
+   * `sgnl://linkdevice?...` URI, and finishes the handshake in a background
+   * goroutine once the admin scans it. The phone number is NOT supplied by
+   * the caller — it appears in `GET /v1/accounts` after the scan succeeds.
+   *
+   * We persist the deviceName as `sessionId`; the API correlates the linked
+   * number by diffing the account list against the pre-link snapshot, since
+   * the sidecar's account list carries no device name.
    */
   async provisionQr(
     account: AccountConfig,
@@ -246,7 +323,7 @@ export class SignalCliRestApiAdapter {
         false,
       );
     }
-    const url = `${this.baseUrl(account)}/v1/qrcodelink?device_name=${encodeURIComponent(
+    const url = `${this.baseUrl(account)}/v1/qrcodelink/raw?device_name=${encodeURIComponent(
       deviceName,
     )}`;
     let res: Response;
@@ -260,7 +337,9 @@ export class SignalCliRestApiAdapter {
       );
     }
     const body: any = await res.json().catch(() => ({}));
-    if (!res.ok || !body?.uri) {
+    // Real sidecar: `device_link_uri`. Dev stub: `uri`.
+    const uri = body?.device_link_uri ?? body?.uri;
+    if (!res.ok || !uri) {
       throw new ProvisioningError(
         `signal-cli-rest-api qrcodelink returned ${res.status}`,
         res.status >= 500 ? 'TRANSPORT_ERROR' : 'BAD_RESPONSE',
@@ -270,7 +349,10 @@ export class SignalCliRestApiAdapter {
     }
     return {
       sessionId: deviceName,
-      uri: String(body.uri),
+      uri: String(uri),
+      // The sidecar reports no expiry; signal-cli's provisioning URI is
+      // valid for a few minutes server-side. 10 min matches the wizard's
+      // patience without leaving stale rows around forever.
       ttlSeconds: Number(body.expires_in ?? 600),
     };
   }
@@ -297,21 +379,49 @@ export class SignalCliRestApiAdapter {
     }
     const body: any = await res.json().catch(() => []);
     if (!Array.isArray(body)) return [];
-    return body.map((a: any) => ({
-      externalId: String(a?.number ?? ''),
-      phoneE164: a?.number ? String(a.number) : null,
-      uuid: a?.uuid ? String(a.uuid) : null,
-      deviceName: a?.device_name ?? a?.deviceName ?? null,
-      raw: a,
-    }));
+    // The real sidecar returns a bare `["+380…", …]` — signal-cli's
+    // `listAccounts` output is flattened to numbers before it reaches us, so
+    // there is no uuid and no device name to match on. The dev stub returns
+    // objects; accept both shapes.
+    return body.map((a: any) => {
+      if (typeof a === 'string') {
+        return { externalId: a, phoneE164: a, uuid: null, deviceName: null, raw: a };
+      }
+      const number = a?.number ? String(a.number) : '';
+      return {
+        externalId: number,
+        phoneE164: number || null,
+        uuid: a?.uuid ? String(a.uuid) : null,
+        deviceName: a?.device_name ?? a?.deviceName ?? null,
+        raw: a,
+      };
+    });
   }
 
-  /** `DELETE /v1/accounts/{number}` — detach a paired device. */
+  /**
+   * `DELETE /v1/devices/{number}/local-data` — drop this installation's copy
+   * of the account.
+   *
+   * UMG is itself a *linked device* of the admin's phone, so "unlink" means
+   * forgetting our local keys; the primary account is untouched and the
+   * admin removes the stale entry from Signal → Linked devices. There is no
+   * `DELETE /v1/accounts/{number}` on the real sidecar.
+   */
   async unlink(account: AccountConfig, externalId: string): Promise<void> {
-    const url = `${this.baseUrl(account)}/v1/accounts/${encodeURIComponent(externalId)}`;
+    const url = `${this.baseUrl(account)}/v1/devices/${encodeURIComponent(
+      externalId,
+    )}/local-data`;
     let res: Response;
     try {
-      res = await fetch(url, { method: 'DELETE' });
+      res = await fetch(url, {
+        method: 'DELETE',
+        headers: { 'content-type': 'application/json' },
+        // Without this signal-cli refuses to drop the data of a still-registered
+        // account and answers 400, so unlinking never worked from the UI. We
+        // *are* the linked device: forgetting our own keys is the whole point,
+        // and the primary account on the admin's phone is untouched.
+        body: JSON.stringify({ ignore_registered: true }),
+      });
     } catch (e: any) {
       throw new ProvisioningError(
         `signal-cli-rest-api unlink network error: ${e?.message ?? e}`,

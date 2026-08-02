@@ -75,6 +75,17 @@ export interface ChannelAdapter {
   /** Submit the verification code the admin received. */
   verifyCode?(account: AccountConfig, input: VerifyCodeInput): Promise<VerifyCodeResult>;
 
+  /**
+   * Fetch a QR image the sidecar rendered itself, given the `imageUrl` from
+   * `provisionQr`. Implemented only by adapters whose sidecar serves the QR
+   * as an image on the internal `transports` network; the API proxies the
+   * bytes out to the browser, which cannot reach that network.
+   */
+  fetchProvisioningImage?(
+    account: AccountConfig,
+    imageUrl: string,
+  ): Promise<{ bytes: Uint8Array; contentType: string }>;
+
   /** List devices/accounts already linked on the sidecar (reconcile orphans). */
   listProvisionedAccounts?(account: AccountConfig): Promise<ProvisionedAccount[]>;
 

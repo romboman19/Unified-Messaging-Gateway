@@ -24,15 +24,16 @@ import {
  *
  * We use this in place of UnoAPI because UnoAPI 2.x no longer returns QR
  * codes in a JSON HTTP response — pairing happens via a socket.io WebSocket
- * — which doesn't fit our wizard-driven QR flow. gwmd v1+ returns a JSON
+ * — which doesn't fit our wizard-driven QR flow. gwmd returns a JSON
  * envelope `{ qr_link, qr_duration, device_id }` from
- * `GET /devices/:device_id/login`; `qr_link` is an HTTPS URL the sidecar
- * itself serves (a PNG of the QR), so the web UI can either:
- *   - fetch the URL directly (if the sidecar is exposed on a network the
- *     browser can reach), or
- *   - call `GET /api/v1/transport-accounts/:id/provision/:endpointId/qr.png`,
- *     a small API proxy that streams the sidecar image back with CORS
- *     headers.
+ * `GET /devices/:device_id/login`, where `qr_link` is a URL the sidecar
+ * itself serves as a PNG.
+ *
+ * That URL is built from the request's Host header and therefore names the
+ * sidecar on the internal `transports` network, which the admin's browser
+ * cannot reach. `fetchProvisioningImage` below pulls the bytes API-side and
+ * `GET /api/v1/transport-accounts/:id/provision/:endpointId/qr.png` streams
+ * them out.
  *
  * Required config (`account.configJson`):
  *   baseUrl:   e.g. "http://gwmd:3000"
@@ -47,9 +48,9 @@ import {
  *   GET  /app/devices/:device_id/login    (mint QR)
  *   DELETE /app/devices/:device_id        (logout)
  *
- * NOTE: gwmd mounts its REST under an `AppBasePath` (default `/app`); the
- * service is configured with `--app-base-path /app` and we hardcode `/app`
- * here. If you change `AppBasePath` on the sidecar, mirror it here.
+ * NOTE: gwmd mounts its REST under a configurable base path; the service
+ * runs with `--base-path=/app` (named `--app-base-path` on the development
+ * branch) and we hardcode `/app` here. Change one and you must change both.
  */
 export class GwmdAdapter {
   readonly name = 'gwmd';
@@ -124,7 +125,16 @@ export class GwmdAdapter {
     account: AccountConfig,
   ): Promise<SendResult> {
     const deviceId = this.deviceIdOf(endpoint);
-    const url = `${this.baseUrl(account)}/app/send/${encodeURIComponent(deviceId)}`;
+    // gwmd's send routes are device-agnostic: the device is picked by the
+    // `X-Device-Id` header (middleware/device.go), NOT by a path segment.
+    // The media kind selects the route — text, image and file are separate.
+    const media = outbound.content.media;
+    const route = !media ? 'message'
+      : media.mime?.startsWith('image/') ? 'image'
+      : media.mime?.startsWith('video/') ? 'video'
+      : media.mime?.startsWith('audio/') ? 'audio'
+      : 'file';
+    const url = `${this.baseUrl(account)}/app/send/${route}`;
     const recipient = outbound.to[0]?.e164 ?? outbound.to[0]?.raw ?? '';
     const payload: Record<string, unknown> = {
       phone: recipient.replace(/^\+/, ''),
@@ -133,9 +143,11 @@ export class GwmdAdapter {
     if (outbound.content.replyToMessageId) {
       payload['reply_message_id'] = outbound.content.replyToMessageId;
     }
-    if (outbound.content.media?.url) {
-      // gwmd accepts media URL via the `media_url` field (image/video/document).
-      payload['media_url'] = outbound.content.media.url;
+    if (media?.url) {
+      // Media routes take a remote URL under a per-route field and carry the
+      // accompanying text as `caption`.
+      payload[route === 'file' ? 'file_url' : `${route}_url`] = media.url;
+      payload['caption'] = outbound.content.text ?? '';
     }
     if (outbound.content.reaction) {
       payload['reaction'] = outbound.content.reaction;
@@ -144,7 +156,10 @@ export class GwmdAdapter {
     try {
       const res = await fetch(url, {
         method: 'POST',
-        headers: this.authHeaders(account),
+        // gwmd runs url.QueryUnescape over X-Device-Id (middleware/device.go),
+        // so the value has to be encoded to survive intact. Legacy endpoints
+        // whose id literally contains "%2B" only resolve this way.
+        headers: { ...this.authHeaders(account), 'x-device-id': encodeURIComponent(deviceId) },
         body: JSON.stringify(payload),
       });
       const raw: any = await res.json().catch(() => ({}));
@@ -185,36 +200,73 @@ export class GwmdAdapter {
    * (`--webhook-url`). The worker subscribes and routes the payloads
    * here for canonicalisation.
    */
-  normalizeInbound(_account: AccountConfig, _endpoint: EndpointConfig, raw: unknown): CanonicalInbound[] {
+  normalizeInbound(_account: AccountConfig, endpoint: EndpointConfig, raw: unknown): CanonicalInbound[] {
     if (!raw || typeof raw !== 'object') return [];
-    const r: any = raw;
-    // gwmd webhook envelope: { event: "message", payload: { ... } }.
-    if (r.event && r.event !== 'message') return [];
-    const m: any = r.payload ?? r;
-    if (!m || (!m.message && !m.image && !m.video && !m.document && !m.audio)) return [];
-    const ts = Number(m.timestamp ?? Date.now());
-    const from = makeAddress(String(m.from ?? m.sender ?? ''));
-    const to = [makeAddress(String(m.to ?? _endpoint.phoneE164 ?? ''))];
-    const type = m.image ? 'image' : m.video ? 'video' : m.audio ? 'audio' :
-                 m.document ? 'document' : m.sticker ? 'sticker' :
-                 m.location ? 'location' : m.contact ? 'contact' :
-                 m.reaction ? 'reaction' : m.message ? 'text' : 'unknown';
+    const outer: any = raw;
+    // The delivered envelope nests the message under `payload`, with routing
+    // fields alongside it:
+    //   { event, device_id, session_id, payload: { … } }
+    // Verified against a live delivery; some builds post the message fields
+    // flat, so fall back to the outer object.
+    const m: any = outer.payload ?? outer;
+    // Fields inside `payload` that matter here:
+    //   id           WhatsApp message id
+    //   timestamp    RFC3339 string (NOT epoch)
+    //   from         sender JID, e.g. "380671476395@s.whatsapp.net"
+    //   from_name    pushname
+    //   body         the message text (NOT `message`)
+    //   image/video/audio/document/sticker  media descriptors
+    //   is_from_me   true for our own outgoing messages, echoed back
+    if (outer.event && outer.event !== 'message' && outer.event !== 'message.reaction') return [];
+    // Our own outbound messages come back over the same webhook; ingesting
+    // them would double-count every reply we send.
+    if (m.is_from_me === true) return [];
+
+    const hasMedia = !!(m.image || m.video || m.audio || m.document || m.sticker || m.video_note);
+    if (!m.body && !hasMedia && !m.reaction) return [];
+
+    // `timestamp` is RFC3339; Date.parse handles it. Fall back to now() only
+    // when the field is missing or unparseable.
+    const parsed = m.timestamp ? Date.parse(String(m.timestamp)) : NaN;
+    const receivedAt = Number.isNaN(parsed) ? new Date() : new Date(parsed);
+
+    const from = makeAddress(jidToPhone(String(m.from ?? '')) ?? String(m.from ?? ''));
+    const to = [makeAddress(String(endpoint.phoneE164 ?? endpoint.externalId ?? ''))];
+    const media = m.image ?? m.video ?? m.audio ?? m.document ?? m.sticker ?? m.video_note;
+    const type: CanonicalInbound['type'] =
+      m.reaction ? 'reaction' :
+      m.image ? 'image' :
+      m.video || m.video_note ? 'video' :
+      m.audio ? 'audio' :
+      m.document ? 'document' :
+      m.sticker ? 'sticker' :
+      m.body ? 'text' : 'unknown';
+
     return [{
-      externalId: String(m.id ?? m.message_id ?? ts),
+      externalId: String(m.id ?? ''),
       from,
       to,
       type,
       content: {
-        text: m.message ?? undefined,
-        media: m.image || m.video || m.audio || m.document
-          ? { url: m.image?.url ?? m.video?.url ?? m.audio?.url ?? m.document?.url,
-              mime: m.image?.mime_type ?? m.video?.mime_type,
-              filename: m.document?.filename }
+        text: m.body ?? undefined,
+        // Media descriptors are either a bare path string (auto-download on)
+        // or an object carrying url/mime/filename.
+        media: hasMedia
+          ? {
+              url: typeof media === 'string' ? media : (media?.url ?? media?.media_path),
+              mime: typeof media === 'string' ? undefined : media?.mime_type,
+              filename: typeof media === 'string' ? undefined : media?.file_name,
+            }
           : undefined,
-        reaction: m.reaction?.emoji,
-        replyToMessageId: m.context?.id ?? m.context?.message_id,
+        reaction: typeof m.reaction === 'string' ? m.reaction : m.reaction?.emoji,
+        replyToMessageId: m.replied_to_id ?? m.reacted_message_id,
+        meta: {
+          senderName: m.from_name ?? null,
+          chatId: m.chat_id ?? null,
+          sessionId: m.session_id ?? null,
+        },
       },
-      receivedAt: new Date(ts * (ts < 1e12 ? 1000 : 1)),
+      receivedAt,
       rawPayload: raw,
     }];
   }
@@ -262,14 +314,20 @@ export class GwmdAdapter {
     account: AccountConfig,
     input: ProvisionQrInput,
   ): Promise<ProvisionQrResult> {
-    const deviceId = String(input.deviceName ?? '').trim();
-    if (!deviceId) {
+    const requested = String(input.deviceName ?? '').trim();
+    if (!requested) {
       throw new ProvisioningError(
         'phoneE164 is required for gwmd (used as device_id)',
         'INVALID_INPUT',
         false,
       );
     }
+    // Strip everything but digits. gwmd takes the id from a JSON body on
+    // create but from a URL path segment on login, and Fiber does not decode
+    // path params — so a "+" prefix produced TWO devices ("+380..." and
+    // "%2B380..."), with the QR pairing landing on one and sends addressing
+    // the other. An id with nothing to escape keeps both paths identical.
+    const deviceId = requested.replace(/\D/g, '') || requested;
 
     // Step 1: create the device session (idempotent — gwmd returns the
     // existing device when the id is already known).
@@ -331,18 +389,81 @@ export class GwmdAdapter {
     }
     return {
       sessionId: String(results.device_id ?? deviceId),
-      // gwmd returns a URL (not a base64 payload), so the web UI fetches
-      // it as an image. We still store it in `uri` for the wizard's
-      // debug panel and any future image-proxy logic.
+      // gwmd renders the QR itself and returns a URL built from the request
+      // Host — e.g. `http://gwmd:3000/app/statics/…`. That host only exists
+      // on the internal `transports` network, so the API proxies the image
+      // rather than passing this URL to the browser.
       uri: qrLink,
+      imageUrl: qrLink,
       ttlSeconds: Number(results.qr_duration ?? 60),
     };
   }
 
   /**
-   * `GET /devices` — list devices known to this gwmd sidecar.
-   * Paired status comes from `is_logged_in` (we re-read each device's status
-   * to keep this list cheap; gwmd's /devices returns lightweight metadata).
+   * Pull the rendered QR PNG off the sidecar so the API can stream it to the
+   * admin's browser. gwmd puts the image behind the same basic auth as the
+   * REST surface, so we reuse the account credentials.
+   */
+  async fetchProvisioningImage(
+    account: AccountConfig,
+    imageUrl: string,
+  ): Promise<{ bytes: Uint8Array; contentType: string }> {
+    // `imageUrl` comes from a vendor response, so treat it as untrusted:
+    // accept it only if it names the configured sidecar host, then fetch it
+    // from our own base URL rather than the vendor's string. gwmd builds the
+    // URL from the request Host header and drops the port, so the raw value
+    // would resolve to port 80 and never answer.
+    let target: URL;
+    let allowed: URL;
+    try {
+      target = new URL(imageUrl);
+      allowed = new URL(this.baseUrl(account));
+    } catch {
+      throw new ProvisioningError('gwmd QR image URL is malformed', 'BAD_RESPONSE', false);
+    }
+    if (target.hostname !== allowed.hostname) {
+      throw new ProvisioningError(
+        `gwmd QR image URL points outside the sidecar (${target.hostname})`,
+        'BAD_RESPONSE',
+        false,
+      );
+    }
+    const fetchUrl = new URL(target.pathname + target.search, allowed.origin);
+
+    let res: Response;
+    try {
+      res = await fetch(fetchUrl.toString(), {
+        method: 'GET',
+        headers: this.authHeader(account) ? { authorization: this.authHeader(account)! } : {},
+      });
+    } catch (e: any) {
+      throw new ProvisioningError(
+        `gwmd QR image network error: ${e?.message ?? e}`,
+        'TRANSPORT_ERROR',
+        true,
+      );
+    }
+    if (!res.ok) {
+      throw new ProvisioningError(
+        `gwmd QR image returned ${res.status}`,
+        res.status >= 500 ? 'TRANSPORT_ERROR' : 'BAD_RESPONSE',
+        res.status >= 500,
+      );
+    }
+    return {
+      bytes: new Uint8Array(await res.arrayBuffer()),
+      contentType: res.headers.get('content-type') ?? 'image/png',
+    };
+  }
+
+  /**
+   * `GET /devices` — devices known to this gwmd sidecar that are actually
+   * paired.
+   *
+   * The wizard creates the device row *before* rendering the QR, so an
+   * unfiltered list would contain the pending device and the API's poll
+   * would declare it linked the instant it started. Only `state ==
+   * "logged_in"` (or a non-empty JID) means a phone completed the scan.
    */
   async listProvisionedAccounts(account: AccountConfig): Promise<ProvisionedAccount[]> {
     const url = `${this.baseUrl(account)}/app/devices`;
@@ -368,24 +489,30 @@ export class GwmdAdapter {
       : Array.isArray(body?.results) ? body.results
       : Array.isArray(body?.data) ? body.data
       : [];
-    return list.map((d: any) => {
-      // gwmd's /devices list returns the per-device record built by
-      // `deriveState`: ID (== device_id), JID, State ∈ {Connected,
-      // LoggedIn, Disconnected}, PhoneNumber, DisplayName, CreatedAt.
-      // We surface device_id as externalId (gwmd treats it as the
-      // DELETE/GET /:id key), JID-derived E.164 as phoneE164, and the
-      // device_id again as deviceName so the poll matcher can pick the
-      // wizard's row back out via deviceName fallback.
-      const deviceId = String(d?.ID ?? d?.device_id ?? d?.id ?? '');
-      const jid = d?.JID ?? d?.jid ?? '';
-      return {
-        externalId: deviceId,
-        phoneE164: jid ? jidToPhone(jid) : (d?.PhoneNumber ?? d?.phone ?? null),
-        uuid: null,
-        deviceName: deviceId,
-        raw: d,
-      };
-    });
+    return list
+      // gwmd's /devices record (domains/device.Device): id, phone_number,
+      // display_name, state ∈ {disconnected, connecting, connected,
+      // logged_in}, jid, created_at. The dev stub mirrors it with
+      // capitalised keys, so read both.
+      .filter((d: any) => {
+        const state = String(d?.state ?? d?.State ?? '').toLowerCase();
+        const jid = String(d?.jid ?? d?.JID ?? '');
+        return state === 'logged_in' || state === 'loggedin' || jid !== '';
+      })
+      .map((d: any) => {
+        // device_id is externalId (gwmd's DELETE/GET /:id key); the
+        // JID-derived E.164 is the phone; device_id doubles as deviceName so
+        // the poll matcher can find the wizard's row.
+        const deviceId = String(d?.ID ?? d?.device_id ?? d?.id ?? '');
+        const jid = d?.JID ?? d?.jid ?? '';
+        return {
+          externalId: deviceId,
+          phoneE164: jid ? jidToPhone(jid) : (d?.phone_number ?? d?.PhoneNumber ?? d?.phone ?? null),
+          uuid: null,
+          deviceName: deviceId,
+          raw: d,
+        };
+      });
   }
 
   /** `DELETE /devices/:device_id` — log out (paired credentials kept on disk). */
