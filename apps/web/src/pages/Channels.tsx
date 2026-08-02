@@ -13,6 +13,7 @@ import type {
   TransportAccount,
 } from '../lib/types';
 import { ProvisioningWizard } from '../components/ProvisioningWizard';
+import { apiError } from '../lib/format';
 
 type EndpointDraft = {
   label: string;
@@ -98,12 +99,32 @@ export default function ChannelsPage() {
   }
 
   async function deleteEndpoint(id: string) {
-    if (!confirm('Видалити endpoint?')) return;
+    if (!confirm('Видалити номер?')) return;
     try {
       await api.delete(`/endpoints/${id}`);
       await fetchAccounts();
+      return;
     } catch (err) {
-      setError('Не вдалося видалити endpoint.');
+      // The API refuses by default when the number still carries history, and
+      // says how much. Show that instead of a blanket failure, and let the
+      // admin decide — silently swallowing it is what made delete look broken.
+      const status = (err as { response?: { status?: number } })?.response?.status;
+      const message = apiError(err, 'Не вдалося видалити номер.');
+      if (status !== 409) {
+        setError(message);
+        return;
+      }
+      if (!confirm(`${message}\n\nВидалити номер разом з історією?`)) {
+        setError('');
+        return;
+      }
+      try {
+        await api.delete(`/endpoints/${id}?force=true`);
+        await fetchAccounts();
+        setError('');
+      } catch (forceErr) {
+        setError(apiError(forceErr, 'Не вдалося видалити номер разом з історією.'));
+      }
     }
   }
 

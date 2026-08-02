@@ -47,6 +47,8 @@ export interface Message {
   statusHistory?: StatusHistoryEntry[];
   attemptsCount?: number;
   statusHistoryCount?: number;
+  /** Why the last send attempt failed, when it did. */
+  lastError?: { code: string; message: string } | null;
 }
 
 export interface Conversation {
@@ -221,7 +223,12 @@ export interface ProvisionedAccount {
 
 export interface ProvisionQrResult {
   endpointId: string;
-  uri: string;
+  /** Link URI to render as a QR in the browser (Signal). Null for sidecars
+   *  that render the QR themselves. */
+  uri: string | null;
+  /** API path serving the sidecar-rendered QR image (gwmd). Null when `uri`
+   *  is set. */
+  qrImageUrl: string | null;
   ttlSeconds: number;
 }
 

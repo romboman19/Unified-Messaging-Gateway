@@ -1,17 +1,23 @@
 import qrcode from 'qrcode-generator';
 
+/** Quiet zone required by the QR spec, in modules. Phone scanners rely on
+ *  it to find the symbol; anything less and pairing fails intermittently. */
+const QUIET_ZONE = 4;
+
 /**
  * Tiny QR renderer. Hand-rolled to avoid pulling in a heavier image lib.
  * Uses `qrcode-generator` (Type 0 = auto-detect minimum version, error
- * correction L is enough for the URIs we encode — typically < 256 chars).
+ * correction M — the link URIs run ~150 chars and get scanned off a screen
+ * at an angle, so the extra redundancy is worth the denser symbol).
  */
 export function QrImage({ uri, size = 256 }: { uri: string; size?: number }) {
-  const qr = qrcode(0, 'L');
+  const qr = qrcode(0, 'M');
   qr.addData(uri);
   qr.make();
   const moduleCount = qr.getModuleCount();
-  const cellSize = Math.floor(size / (moduleCount + 4));
-  const realSize = cellSize * (moduleCount + 4);
+  const totalModules = moduleCount + QUIET_ZONE * 2;
+  const cellSize = Math.max(1, Math.floor(size / totalModules));
+  const realSize = cellSize * totalModules;
   const cells: JSX.Element[] = [];
   for (let r = 0; r < moduleCount; r++) {
     for (let c = 0; c < moduleCount; c++) {
@@ -19,8 +25,8 @@ export function QrImage({ uri, size = 256 }: { uri: string; size?: number }) {
         cells.push(
           <rect
             key={`${r}-${c}`}
-            x={2 + c * cellSize}
-            y={2 + r * cellSize}
+            x={(QUIET_ZONE + c) * cellSize}
+            y={(QUIET_ZONE + r) * cellSize}
             width={cellSize}
             height={cellSize}
             fill="black"
