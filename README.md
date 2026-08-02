@@ -1,109 +1,241 @@
 # Unified Messaging Gateway (UMG)
 
-Внутрішній єдиний шлюз для SMS, WhatsApp та Signal. NestJS + React, розгорнутий через Docker Compose. Milestone 0 (скелет: авторизація, канали, повідомлення) та Milestone 1 (маршрутизація, вебхуки, вкладення, алерти) виконані.
+Єдиний шлюз між месенджерами й вашою CRM. Адміністратор через веб-інтерфейс
+привʼязує телефонні номери до Signal та WhatsApp і налаштовує, куди пересилати
+листування — без доступу до серверів, консолі чи вендорських конфігів.
+
+Ключова ідея: **людина, яка підключає номери, не мусить знати бекенд**. Вона
+відкриває сторінку, натискає «Привʼязати номер», сканує QR телефоном — і номер
+починає працювати. Усе інше (контейнери месенджерів, черги, ретраї, зберігання
+медіа) — прихована частина, розгорнута через Docker Compose.
+
+## Зміст
+
+- [Що вміє система](#що-вміє-система)
+- [Швидкий старт](#швидкий-старт)
+- [Як адміністратор підключає номер](#як-адміністратор-підключає-номер)
+- [Архітектура](#архітектура)
+- [Транспорти](#транспорти)
+- [Прийом і пересилання повідомлень](#прийом-і-пересилання-повідомлень)
+- [Медіафайли](#медіафайли)
+- [API](#api)
+- [Стан і обмеження](#стан-і-обмеження)
+- [Тести](#тести)
+- [Документація](#документація)
+
+## Що вміє система
+
+| Можливість | Signal | WhatsApp | SMS (GoIP) |
+|---|---|---|---|
+| Привʼязка номера через QR у вебі | так | так | не застосовно |
+| Кілька номерів на канал | так | так | лінії SIM |
+| Відправка тексту | так | так | заглушка |
+| Відправка медіа | так | так | заглушка |
+| Прийом тексту | так | так | заглушка |
+| Прийом медіа | так | так | заглушка |
+| Пересилання на webhook / email / Telegram | так | так | так |
+
+Поверх цього: тест-чат для діагностики, журнал доставок з DLQ і ручним
+повтором, алерти, аудит-лог, API-токени, підписані посилання на файли.
 
 ## Швидкий старт
 
 ```bash
-cp .env.example .env          # задай сильні секрети
-sed -i 's/change-me-.*//' .env # <-- обов'язково заміни значення
-
-docker compose up -d
+git clone https://github.com/romboman19/Unified-Messaging-Gateway.git /srv/umg
+cd /srv/umg
+cp .env.example .env
 ```
 
-Інтерфейс доступний на порту `8083`.
+У `.env` **обовʼязково** замініть усі значення `change-me-*` на власні секрети —
+`ADMIN_BOOTSTRAP_PASSWORD`, `SESSION_SECRET`, `COOKIE_SECRET`,
+`GWMD_PASSWORD`, `GWMD_WEBHOOK_SECRET`. Система стартує і з дефолтними, але це
+означає загальновідомий пароль адміністратора.
 
-## Авторизація
+Розгортання з реальними месенджерами:
 
-- Адмін-веб: логін `admin`, пароль у `.env` (`ADMIN_BOOTSTRAP_PASSWORD`).
-- API: створіть Bearer token через UI або `POST /api/v1/api-tokens` у сесії адміна.
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+```
 
-## Основні компоненти
+Інтерфейс — `http://<хост>:8083`, логін `admin`, пароль з `.env`.
+
+Без `docker-compose.prod.yml` піднімуться **заглушки** замість справжніх
+месенджерів: вони корисні для розробки й тестів, але QR з них не сканується.
+
+## Як адміністратор підключає номер
+
+1. **Канали** → потрібний канал → **Привʼязати номер**.
+2. Для Signal — вводить довільне імʼя пристрою, для WhatsApp — номер телефону.
+3. Зʼявляється QR. Сканує телефоном:
+   - Signal: Налаштування → Привʼязані пристрої → «+»;
+   - WhatsApp: Налаштування → Привʼязані пристрої → «Привʼязати пристрій».
+4. Після сканування номер сам переходить у стан «привʼязаний» — сторінка
+   опитує транспорт і підхоплює його без перезавантаження.
+5. **Маршрутизація** → створює правило: які події й з яких номерів пересилати
+   і куди (webhook у CRM, email, Telegram).
+
+Відвʼязати номер можна там само. Видалити номер разом з історією листування —
+теж, але система спершу попросить підтвердження і скаже, скільки повідомлень
+буде втрачено.
+
+## Архітектура
+
+Модульний моноліт (NestJS) + окремий worker, обидва на спільній базі.
 
 | Сервіс | Призначення |
 |---|---|
-| `reverse-proxy` | nginx на 8083 |
+| `reverse-proxy` | nginx на 8083, єдина точка входу |
 | `umg-web` | React 18 + Vite + Tailwind |
-| `umg-api` | NestJS 10 API |
-| `umg-worker` | BullMQ worker для відправки |
+| `umg-api` | NestJS: REST, сесії, вебхуки від вендорів |
+| `umg-worker` | BullMQ: відправка, прийом, доставка на destinations |
 | `postgres` | PostgreSQL 17 + Prisma |
-| `redis` | Redis 8 + BullMQ + сесії |
+| `redis` | черги BullMQ + сесії |
+| `signal-cli`, `gwmd`, `dbsms-vendor` | вендорські sidecar-контейнери |
 
-## Керування каналами
+Мережі розділені навмисно:
 
-Веб-інтерфейс для створення транспортних акаунтів та endpoint доступний за адресою `/channels` після входу:
+- `frontend` — nginx, web, api;
+- `backend` (`internal: true`) — база й Redis, без виходу назовні;
+- `transports` (`internal: true`) — sidecar-и месенджерів;
+- `transports-egress` — **лише** для Signal і WhatsApp.
 
-- Створення акаунта: тип (`mock`, `sms`, `whatsapp`, `signal`), адаптер, назва, статус.
-- Додавання endpoint до акаунта: назва, ID лінії/номер, телефон.
-- Увімкнення/вимкнення акаунта чи endpoint, видалення.
+Останнє важливе: Signal і WhatsApp фізично не можуть працювати без доступу до
+серверів своїх провайдерів, тому їм потрібен вихід у мережу. GoIP такого
+доступу не має і не повинен мати — він лишається повністю ізольованим.
 
-Еквівалентні операції доступні через API:
+## Транспорти
 
-- `GET /api/v1/transport-accounts`
-- `POST /api/v1/transport-accounts`
-- `PATCH /api/v1/transport-accounts/:id`
-- `DELETE /api/v1/transport-accounts/:id`
-- `POST /api/v1/transport-accounts/:id/endpoints`
-- `PATCH /api/v1/endpoints/:id`
-- `DELETE /api/v1/endpoints/:id`
+| Канал | Sidecar | Ліцензія |
+|---|---|---|
+| Signal | [`bbernhard/signal-cli-rest-api`](https://github.com/bbernhard/signal-cli-rest-api) | MIT (signal-cli — GPL-3.0) |
+| WhatsApp | [`aldinokemal2104/go-whatsapp-web-multidevice`](https://github.com/aldinokemal/go-whatsapp-web-multidevice) | MIT |
+| SMS | DBLtek GoIP SMS Server | вендорський архів, не комітиться |
 
-## Smoke test
+UMG виступає **привʼязаним пристроєм** акаунта адміністратора, а не окремою
+реєстрацією. Наслідки, про які варто знати:
+
+- «Відвʼязати» означає, що UMG забуває власні ключі; основний акаунт на
+  телефоні не зачіпається, але мертвий запис у списку пристроїв варто
+  прибрати вручну з телефону;
+- надіслати повідомлення можна лише на номер, **зареєстрований** у
+  відповідному месенджері. Якщо адресата там немає, UMG так і напише —
+  «Номер не зареєстрований у Signal», а не абстрактне «не вдалося».
+
+UnoAPI як альтернативний WhatsApp-транспорт **не розгортається**: у версії 2.x
+він віддає QR лише через socket.io, чого майстер привʼязки не вміє. Код
+адаптера лишився, сервіс виведений у профіль `parked`.
+
+## Прийом і пересилання повідомлень
+
+Два різні механізми, бо месенджери влаштовані по-різному:
+
+- **WhatsApp** шле вебхук на `POST /api/v1/webhooks/gwmd`. Це єдиний
+  маршрут без сесії; автентичність підтверджується підписом
+  `X-Hub-Signature-256` (HMAC-SHA256 над сирим тілом) зі спільним секретом
+  `GWMD_WEBHOOK_SECRET`.
+- **Signal** вебхуків не має. Worker тримає websocket до sidecar на кожен
+  привʼязаний номер. Це не лише спосіб побачити повідомлення: поки чергу
+  ніхто не вичитує, **відправник бачить повідомлення як недоставлене**.
+
+Далі шлях спільний: повідомлення канонізується адаптером, зберігається,
+привʼязується до розмови й породжує подію `message.received`. Її підхоплює
+outbox і роутинг, який розкидає подію на налаштовані destinations з ретраями,
+DLQ та підписом HMAC.
+
+Прийом ідемпотентний за ідентифікатором повідомлення: вендори повторюють
+вебхуки, а Signal після перепідключення програє чергу заново.
+
+Окремо: Signal дублює на привʼязані пристрої й **власні** повідомлення
+адміністратора, надіслані з телефону. Вони зберігаються як вихідні й лягають
+у ту саму розмову, тож у вебі видно обидва боки листування.
+
+## Медіафайли
+
+Файли забираються з sidecar-а **в момент прийому** і зберігаються в UMG.
+Інакше вони губляться: WhatsApp тримає розшифровані файли в тимчасовому шарі
+контейнера, а Signal віддає вкладення лише поки не спорожнить чергу.
+
+Розкладка сховища — `/data/media/РРРР/ММ/ДД/<хеш>/<uuid>.<ext>`, спільний том
+для API та worker. Ліміт 50 МБ, автоматична чистка через 60 днів. Якщо файл
+не вдалося забрати, повідомлення все одно зберігається — текст важливіший.
+
+## API
+
+Повний перелік методів — у самому інтерфейсі, вкладка **API**: він читається
+з живої OpenAPI-схеми сервера, тому не може розійтися з реальністю.
+Машиночитана схема: `GET /api/v1/openapi` (потрібна сесія).
+
+Базовий шлях — `/api/v1`. Автентифікація: cookie-сесія або
+`Authorization: Bearer <токен>` (токени створюються на вкладці API).
+
+Найуживаніше:
+
+```
+POST   /api/v1/auth/login                                 вхід
+GET    /api/v1/transport-accounts                         канали та їхні номери
+POST   /api/v1/transport-accounts/:id/provision/qrcode    отримати QR
+GET    /api/v1/transport-accounts/:id/provision/:ep/poll  статус привʼязки
+DELETE /api/v1/endpoints/:id/registration                 відвʼязати номер
+DELETE /api/v1/endpoints/:id?force=true                   видалити номер з історією
+POST   /api/v1/messages                                   надіслати (токен)
+POST   /api/v1/messages/ui-send                           надіслати (сесія)
+GET    /api/v1/conversations                              розмови
+GET    /api/v1/conversations/:id/messages                 листування
+POST   /api/v1/media                                      завантажити файл
+GET    /api/v1/media/:id                                  отримати файл
+GET    /api/v1/routing-rules                              правила пересилання
+GET    /api/v1/deliveries                                 журнал доставок
+POST   /api/v1/webhooks/gwmd                              вхідні від WhatsApp
+```
+
+## Стан і обмеження
+
+Перевірено на реальних номерах і живих месенджерах:
+
+- привʼязка Signal і WhatsApp через QR у вебі;
+- відправка тексту й зображень обома каналами;
+- прийом тексту обома каналами;
+- прийом медіа у WhatsApp;
+- пересилання на destinations, дедуплікація, видалення номерів.
+
+Не доведено на реальних даних:
+
+- прийом медіа в Signal — тракт написаний, але живого прикладу ще не було;
+- SMS через GoIP — працює лише заглушка, справжнього обладнання не було.
+
+Відомі обмеження:
+
+- секрети destinations зберігаються в базі відкрито; шифрування AES-256-GCM
+  заплановане окремо;
+- nginx резолвить імена сервісів один раз на старті, тому після
+  перестворення контейнера API його треба перезапустити;
+- Swagger UI доступний лише поза продакшеном; у продакшені довідник живе у
+  вкладці API за адмінською сесією.
+
+## Тести
 
 ```bash
 cd /srv/umg
-export ADMIN_BOOTSTRAP_PASSWORD=$(grep ADMIN_BOOTSTRAP_PASSWORD .env | cut -d= -f2)
-python3 tests/smoke-test.py
+set -a; . ./.env; set +a
+export BASE=http://localhost:8083
+
+python3 tests/smoke-test.py            # наскрізний потік на заглушках
+bash tests/curl-provision-signal.sh    # майстер привʼязки Signal
+bash tests/run-gwmd-smoke.sh           # майстер привʼязки WhatsApp
 ```
 
-Smoke test перевіряє: веб-вхід, логін адміна, створення API-токена, створення транспортного акаунта, створення endpoint, відправку mock-повідомлення та його доставку.
-
-## E2E UI test
-
-Для перевірки створення каналу через браузер (потрібен встановлений Playwright):
-
-```bash
-cd /srv/umg
-export UMG_ADMIN_PASSWORD=$(grep ADMIN_BOOTSTRAP_PASSWORD .env | cut -d= -f2)
-node tests/e2e-channels.js ./screenshots-channels
-```
+Тести привʼязки розраховані на заглушки (`docker-compose.yml` без
+`prod`-оверрайду): вони імітують сканування QR, чого з реальним месенджером
+зробити не можна.
 
 ## Документація
 
-- **API**
-  - [docs/api/openapi.yaml](docs/api/openapi.yaml) — OpenAPI 3.0: живі ендпоінти + заплановані (позначені `[Planned]`).
-- **Архітектура**
-  - [docs/architecture/overview.md](docs/architecture/overview.md) — модульний моноліт + worker, компоненти, ADR, потоки даних.
-  - [docs/architecture/adapters.md](docs/architecture/adapters.md) — контракт адаптерів: mock (поточний), GoIP/DBLtek, UnoAPI, Signal.
-  - [docs/architecture/data-model.md](docs/architecture/data-model.md) — схема PostgreSQL/Prisma + заплановані сутності.
-  - [docs/architecture/security.md](docs/architecture/security.md) — модель безпеки (доступ, секрети, ізоляція, SSRF, аудит).
-- **Експлуатація**
-  - [docs/operator-guide/uk.md](docs/operator-guide/uk.md) — посібник оператора (українською): встановлення, перший вхід, токени, канали, маршрутизація, типові проблеми.
-  - [docs/runbooks/backup-restore.md](docs/runbooks/backup-restore.md) — резервне копіювання та відновлення.
-  - [docs/runbooks/channel-down.md](docs/runbooks/channel-down.md) — канал недоступний/деградований.
-  - [docs/runbooks/queue-recovery.md](docs/runbooks/queue-recovery.md) — відновлення черг після інциденту з Redis.
-  - [docs/runbooks/goip-rollback.md](docs/runbooks/goip-rollback.md), [signal-relink.md](docs/runbooks/signal-relink.md), [whatsapp-reconnect.md](docs/runbooks/whatsapp-reconnect.md) — заглушки, будуть заповнені в Milestone 2/4/5.
-- **Ліцензії**: [docs/licensing/third-party.md](docs/licensing/third-party.md) — UnoAPI (GPL-3.0), signal-cli (MIT/власні умови), DBLtek (обмеження редистрибуції).
-- **Історія змін**: [CHANGELOG.md](CHANGELOG.md).
-- **Повне технічне завдання**: [docs/ТЗ.md](docs/ТЗ.md).
-
-## Важливі файли
-
-- `docs/ТЗ.md` — повне технічне завдання.
-- `packages/database/prisma/schema.prisma` — схема БД.
-- `apps/api/src/transport-accounts/` — API акаунтів та endpoint.
-- `apps/api/src/messages/` — API повідомлень.
-- `apps/worker/src/processors/message-send.processor.ts` — worker.
-- `apps/web/src/pages/Channels.tsx` — React-сторінка керування каналами.
-- `apps/web/src/pages/` — інші React-сторінки.
-
-## Наступні кроки
-
-Milestone 1 завершено: рушій маршрутизації, призначення вебхуків (webhook/email/telegram/internal_log) із HMAC-підписом, доставки з DLQ та ручним replay, вкладення з підписаними URL і ретенцією, алерти, нові сторінки UI, повний набір документації.
-
-Далі за [docs/ТЗ.md](docs/ТЗ.md):
-
-- **Milestone 2** — адаптер GoIP/DBLtek SMS Server (sidecar-контейнер, vendor API, rollback runbook).
-- **Milestone 4** — адаптер Signal (signal-cli-rest-api, relink runbook).
-- **Milestone 5** — адаптер WhatsApp через UnoAPI (reconnect runbook).
-
-Деталі контрактів адаптерів: [docs/architecture/adapters.md](docs/architecture/adapters.md).
+- [docs/architecture/overview.md](docs/architecture/overview.md) — компоненти, ADR, потоки даних
+- [docs/architecture/adapters.md](docs/architecture/adapters.md) — контракт адаптерів
+- [docs/architecture/data-model.md](docs/architecture/data-model.md) — схема бази
+- [docs/architecture/security.md](docs/architecture/security.md) — модель безпеки
+- [docs/operator-guide/uk.md](docs/operator-guide/uk.md) — посібник оператора
+- [docs/runbooks/](docs/runbooks/) — інструкції на випадок інцидентів
+- [docs/licensing/third-party.md](docs/licensing/third-party.md) — ліцензії залежностей
+- [docs/ТЗ.md](docs/ТЗ.md) — повне технічне завдання
+- [CHANGELOG.md](CHANGELOG.md) — історія змін
