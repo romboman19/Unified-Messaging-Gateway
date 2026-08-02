@@ -35,8 +35,11 @@ RUN set -eux; \
 # `mysql` is the extension the vendor code uses; `mysqli` covers the one file
 # that was already modernised. The client binary lets the entrypoint seed the
 # schema.
+# `sockets` is not optional: the web UI opens a UDP socket to goipcron to read
+# live line state, and without it every page dies with
+# "Call to undefined function socket_create()".
 RUN set -eux; \
-    docker-php-ext-install mysql mysqli > /dev/null; \
+    docker-php-ext-install mysql mysqli sockets > /dev/null; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
       mysql-client libmariadbclient18 ca-certificates curl procps; \
@@ -64,6 +67,16 @@ RUN set -eux; \
     chmod -R 777 /usr/local/goip; \
     mv /usr/local/goip/goipcron_x64 /usr/local/goip/goipcron; \
     chmod +x /usr/local/goip/goipcron
+
+# The vendor code is PHP 5-era and emits notices and warnings on normal pages.
+# Showing them corrupts the HTML (and breaks session_start by sending output
+# early); logging them keeps the UI usable while the detail stays available in
+# `docker logs`.
+RUN printf '%s\n' \
+      'display_errors = Off' \
+      'log_errors = On' \
+      'error_log = /proc/self/fd/2' \
+      > /usr/local/etc/php/conf.d/zz-goip.ini
 
 COPY dbltek-sms/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
