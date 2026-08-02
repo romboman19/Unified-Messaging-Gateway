@@ -49,6 +49,13 @@ export interface Message {
   statusHistoryCount?: number;
   /** Why the last send attempt failed, when it did. */
   lastError?: { code: string; message: string } | null;
+  /** Files stored for this message; fetch bytes at /api/v1/media/{id}. */
+  attachments?: Array<{
+    id: string;
+    fileName: string;
+    mimeType: string;
+    sizeBytes: number;
+  }>;
 }
 
 export interface Conversation {
