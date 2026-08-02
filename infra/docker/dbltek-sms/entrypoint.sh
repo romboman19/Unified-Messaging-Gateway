@@ -32,6 +32,18 @@ PHP
 
 ROOT_PASS="${SMS_DB_ROOT_PASSWORD:-}"
 
+# Some vendor code calls mysql_real_escape_string() with no link argument. PHP
+# then opens an *implicit* connection from php.ini's mysql.default_* settings,
+# which are unset — so it tries localhost over a unix socket that does not exist
+# here and the call fails. Where that happens inside a write path (USSD replies,
+# for one) the result is silently dropped. Give PHP the same credentials the app
+# uses so the implicit link resolves.
+cat > /usr/local/etc/php/conf.d/zz-goip-db.ini <<INI
+mysql.default_host = ${DB_HOST}
+mysql.default_user = ${DB_USER}
+mysql.default_password = ${DB_PASS}
+INI
+
 echo "[sms-server] waiting for MySQL at ${DB_HOST}…"
 for i in $(seq 1 60); do
   if mysql -h "$DB_HOST" -u "$DB_USER" -p"$DB_PASS" -e 'SELECT 1' >/dev/null 2>&1; then
