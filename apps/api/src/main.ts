@@ -13,7 +13,10 @@ import { LoggerService } from './common/logger.service';
 async function bootstrap() {
   const logger = new LoggerService();
   logger.setContext('Bootstrap');
-  const app = await NestFactory.create(AppModule, { logger });
+  // `rawBody` keeps the unparsed request bytes around so the inbound
+  // vendor webhooks can verify their HMAC signature over exactly what was
+  // sent — re-serialising the parsed JSON would not reproduce it.
+  const app = await NestFactory.create(AppModule, { logger, rawBody: true });
   const config = app.get(ConfigService);
 
   app.setGlobalPrefix('api/v1');

@@ -5,6 +5,9 @@ import { ScheduleModule } from '@nestjs/schedule';
 import { PrismaClient } from '@umg/database';
 import { MessageSendProcessor } from './processors/message-send.processor';
 import { WebhookDeliverProcessor } from './processors/webhook-deliver.processor';
+import { InboundIngestProcessor, INBOUND_INGEST_QUEUE } from './processors/inbound-ingest.processor';
+import { InboundIngestService } from './inbound/inbound-ingest.service';
+import { SignalReceiveBridge } from './inbound/signal-receive.bridge';
 import { AdaptersRegistry, AdaptersFacade } from './adapters/adapters.registry';
 import { MockAdapter } from './adapters/mock.adapter';
 import { EventsService } from './events/events.service';
@@ -25,11 +28,18 @@ import { ReconciliationScheduler } from './schedulers/reconciliation.scheduler';
         port: parseInt(process.env.REDIS_PORT ?? '6379', 10),
       },
     }),
-    BullModule.registerQueue({ name: 'message.send' }, { name: 'webhook.deliver' }),
+    BullModule.registerQueue(
+      { name: 'message.send' },
+      { name: 'webhook.deliver' },
+      { name: INBOUND_INGEST_QUEUE },
+    ),
   ],
   providers: [
     MessageSendProcessor,
     WebhookDeliverProcessor,
+    InboundIngestProcessor,
+    InboundIngestService,
+    SignalReceiveBridge,
     ScheduledSendScheduler,
     OutboxDispatcherScheduler,
     MediaRetentionScheduler,
