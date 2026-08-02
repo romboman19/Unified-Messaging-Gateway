@@ -13,7 +13,13 @@ import type {
 type WizardState =
   | { kind: 'idle' }
   | { kind: 'entering' }
-  | { kind: 'qr'; endpointId: string; uri: string; ttlSeconds: number }
+  | {
+      kind: 'qr';
+      endpointId: string;
+      uri: string | null;
+      qrImageUrl: string | null;
+      ttlSeconds: number;
+    }
   | { kind: 'linked'; endpoint: Endpoint }
   | { kind: 'failed'; message: string };
 
@@ -51,15 +57,6 @@ export function ProvisioningWizard({
   // identically from the UI's point of view; only the adapter behind the
   // `kind:'whatsapp'` API payload differs.
   const isWhatsapp = account.adapter === 'unoapi' || account.adapter === 'gwmd';
-
-  /** Some sidecars (gwmd) return the QR as an image URL — others (Signal,
-   *  UnoAPI) return a URI we must render to QR locally. Heuristic: any
-   *  `data:` / `http(s):` URL is treated as an image; anything else is a
-   *  raw URI to be QR-encoded.
-   */
-  function isImageUrl(uri: string): boolean {
-    return /^(data:|https?:\/\/)/i.test(uri);
-  }
 
   // ───── polling once we have a QR ─────
   useEffect(() => {
@@ -113,6 +110,7 @@ export function ProvisioningWizard({
         kind: 'qr',
         endpointId: res.data.endpointId,
         uri: res.data.uri,
+        qrImageUrl: res.data.qrImageUrl,
         ttlSeconds: res.data.ttlSeconds,
       });
     } catch (err: any) {
@@ -200,20 +198,21 @@ export function ProvisioningWizard({
           <p className="text-sm text-slate-600">
             Відскануйте QR у додатку {isSignal ? 'Signal' : 'WhatsApp'}. Після сканування endpoint автоматично стане активним.
           </p>
-          {isImageUrl(state.uri) ? (
-            // gwmd returns a pre-rendered QR image (data: URL or http(s) URL).
-            // The sidecar's own renderer is the source of truth — we just
-            // forward the URL.
+          {state.qrImageUrl ? (
+            // gwmd renders the QR itself. Its own URL lives on the internal
+            // transports network, so we point at the API's proxy route.
             <img
-              src={state.uri}
+              src={`/api/v1${state.qrImageUrl}`}
               alt="QR-код для прив'язки"
               className="rounded border bg-white p-2"
               style={{ maxWidth: '320px', height: 'auto' }}
             />
-          ) : (
-            // Signal & UnoAPI return a custom-scheme URI we must render locally
-            // so we never embed the vendor's UI in an iframe (TZ §24).
+          ) : state.uri ? (
+            // Signal returns a link URI we render locally, so the vendor's UI
+            // is never embedded in an iframe (TZ §24).
             <QrImage uri={state.uri} />
+          ) : (
+            <p className="text-sm text-red-600">Транспорт не повернув QR-код.</p>
           )}
           {state.ttlSeconds > 0 && (
             <p className="text-xs text-slate-400">
