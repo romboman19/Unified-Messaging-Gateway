@@ -117,6 +117,83 @@ services:
       retries: 10
       start_period: 60s
 
+  # ─────────────── DBLtek GoIP SMS Server (TZ §21) ────────────────────
+  # Replaces the dev stub with the real vendor application. Two processes
+  # matter here: Apache serves the web UI and the JSON API that UMG calls,
+  # and `goipcron` listens on udp/44444 — that is where the GoIP hardware
+  # registers and delivers messages.
+  #
+  # Both ports are published to the host because the GSM gateway is a
+  # physical box on the LAN: it dials *in* to this server using the IP,
+  # Authentication ID and password configured per line on the gateway
+  # itself. Those per-SIM credentials live on the hardware and in the SMS
+  # Server's own "GoIP Manage" screen — UMG never sees them; it holds one
+  # login to the SMS Server and addresses SIMs by line id (G101, G102…).
+  dbsms-vendor:
+    build: !reset null
+    profiles: ["parked"]
+
+  dbsms-db:
+    image: mariadb:10.11
+    container_name: umg-dbsms-db
+    environment:
+      MARIADB_ROOT_PASSWORD: ${SMS_DB_ROOT_PASSWORD:?set in .env}
+      MARIADB_DATABASE: ${SMS_DB_NAME:-goip}
+      MARIADB_USER: ${SMS_DB_USER:-goip}
+      MARIADB_PASSWORD: ${SMS_DB_PASSWORD:?set in .env}
+    volumes:
+      - umg-dbsms-db-data:/var/lib/mysql
+    networks:
+      - transports
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "mariadb-admin ping -h 127.0.0.1 -u root -p$$MARIADB_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  dbsms-server:
+    build:
+      context: ./infra/docker
+      dockerfile: Dockerfile.dbltek-sms
+    image: umg-dbltek-sms:local
+    container_name: umg-dbsms-server
+    environment:
+      SMS_DB_HOST: dbsms-db
+      SMS_DB_NAME: ${SMS_DB_NAME:-goip}
+      SMS_DB_USER: ${SMS_DB_USER:-goip}
+      SMS_DB_PASSWORD: ${SMS_DB_PASSWORD:?set in .env}
+      # Only used once, to import the vendor dump: it creates the database and
+      # its grants, which the application user cannot do.
+      SMS_DB_ROOT_PASSWORD: ${SMS_DB_ROOT_PASSWORD:?set in .env}
+      SMS_GOIPCRON_PORT: "44444"
+      TZ: Europe/Kyiv
+    ports:
+      # Vendor web UI — the admin adds the GoIP and its lines here.
+      - "${SMS_WEB_PORT:-8084}:80"
+      # The gateway registers here. Must stay 44444 unless the same port is
+      # changed on every line of the hardware.
+      - "44444:44444/udp"
+    networks:
+      # `transports` is how umg-api/worker reach the JSON API. `frontend` is
+      # not for egress — a container attached only to an internal network
+      # cannot have host ports published to it.
+      - transports
+      - frontend
+    depends_on:
+      dbsms-db:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1/goip/ >/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+
+volumes:
+  umg-dbsms-db-data:
+
 networks:
   # Outbound-capable network for the sidecars that talk to Signal /
   # WhatsApp. Deliberately separate from `transports` so adding it is an

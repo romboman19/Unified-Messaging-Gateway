@@ -11,46 +11,76 @@ import type {
 import { makeAddress } from '@umg/channel-sdk';
 
 /**
- * Adapter for the DBLtek GoIP SMS Server v1.30.1 sidecar (TZ §21, ADR-003).
+ * Adapter for the DBLtek GoIP SMS Server (TZ §21, ADR-003).
  *
- * The vendor's HTTP API exposes:
- *   POST /goip_sendsms.asp           — auth via ?Username=...&Password=...
- *   GET  /goip_get_sms_status.asp    — query delivery report for an SMS
- *   GET  /querylines.asp             — list active lines and their state
- *   POST /goip_ussd.asp              — send a USSD code, get response
- *   POST /goip_balance.asp           — request SIM balance via USSD
- *   Inbound callback                 — DBLtek POSTs to the URL configured
- *                                      on the line in our admin UI, with
- *                                      form-encoded body.
+ * The SMS Server is a LAMP application that sits between UMG and the GSM
+ * hardware. Its third-party interface is JSON over HTTP POST:
  *
- * Required per-endpoint `configJson`:
- *   { "lineId": <DBLtek line id 1..4>, "simSlot": <int 1..4> }
+ *   POST /goip/sendsms/     { auth, number, content, goip_line?, provider? }
+ *   POST /goip/querysms/    { auth, taskID }
+ *   POST /goip/querylines/  { auth }
+ *
+ * Three details that are easy to get wrong:
+ *   - every request carries `auth`; without it the server answers 401;
+ *   - the trailing slash on the path is mandatory;
+ *   - recipient numbers are bare, without a leading "+".
+ *
+ * Credentials are per *account*, not per SIM. Each SIM's own IP/ID/password is
+ * configured on the GSM gateway itself and mirrored in the SMS Server's "GoIP
+ * Manage" screen — that pairing is between the hardware and the server, and
+ * UMG never sees it. Here a SIM is addressed by its line id ("G101", "G102", …)
+ * which we keep on the endpoint.
  *
  * Required per-account `configJson`:
- *   { "baseUrl": "http://dbtlek-vendor",
- *     "username": "<vendor login>",
- *     "password": "<vendor password>",
- *     "inboundHookSecret": "<shared secret for inbound validation>" }
+ *   { "baseUrl": "http://dbsms-server", "username": "...", "password": "..." }
+ *
+ * Required per-endpoint: `externalId` — the GoIP line id, e.g. "G101".
+ *
+ * Inbound SMS and delivery reports are not polled: the SMS Server POSTs them to
+ * URLs configured in its own System Settings. `normalizeInbound` and
+ * `normalizeStatus` below parse those payloads.
  */
 export class GoipVendorAdapter {
   readonly name = 'goip-vendor';
 
-  private accountCreds(account: AccountConfig): { baseUrl: string; username: string; password: string } {
+  private baseUrl(account: AccountConfig): string {
     const base = (account.configJson.baseUrl ?? '').toString().replace(/\/$/, '');
-    const username = (account.configJson.username ?? '').toString();
-    const password = (account.configJson.password ?? '').toString();
     if (!base) throw new Error('goip-vendor: account.configJson.baseUrl is required');
-    if (!username || !password) throw new Error('goip-vendor: account.configJson.username/password required');
-    return { baseUrl: base, username, password };
+    return base;
   }
 
-  private lineId(endpoint: EndpointConfig): number {
-    const raw = endpoint.configJson?.['lineId'] ?? endpoint.configJson?.['simSlot'];
-    const n = Number(raw);
-    if (!Number.isInteger(n) || n < 1 || n > 4) {
-      throw new Error(`goip-vendor: endpoint.configJson.lineId must be 1..4 (got ${String(raw)})`);
+  private auth(account: AccountConfig): { username: string; password: string } {
+    const username = (account.configJson.username ?? '').toString();
+    const password = (account.configJson.password ?? '').toString();
+    if (!username || !password) {
+      throw new Error('goip-vendor: account.configJson.username/password are required');
     }
-    return n;
+    return { username, password };
+  }
+
+  /** GoIP line id, e.g. "G101". Optional: without it the server round-robins. */
+  private lineId(endpoint: EndpointConfig): string | null {
+    const raw =
+      endpoint.externalId ||
+      (endpoint.configJson?.['goipLine'] ?? endpoint.configJson?.['lineId'] ?? '');
+    const id = String(raw).trim();
+    return id || null;
+  }
+
+  /** Every call is a POST with an `auth` object; the trailing slash matters. */
+  private async call(
+    account: AccountConfig,
+    command: 'sendsms' | 'querysms' | 'querylines',
+    body: Record<string, unknown> = {},
+  ): Promise<{ ok: boolean; status: number; data: any }> {
+    const url = `${this.baseUrl(account)}/goip/${command}/`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ auth: this.auth(account), ...body }),
+    });
+    const data = await res.json().catch(() => null);
+    return { ok: res.ok, status: res.status, data };
   }
 
   async capabilities(): Promise<AdapterCapabilities> {
@@ -63,22 +93,36 @@ export class GoipVendorAdapter {
         reply: false,
         groups: false,
         reactions: false,
-        voice: false,
         media: false,
+        // SIMs are physical and pre-installed; there is nothing to pair.
+        provisioning: 'none',
       },
     };
   }
 
   async healthCheck(account: AccountConfig): Promise<AdapterHealth> {
-    const { baseUrl, username, password } = this.accountCreds(account);
-    const url = `${baseUrl}/querylines.asp?Username=${encodeURIComponent(username)}&Password=${encodeURIComponent(password)}`;
     const t0 = Date.now();
     try {
-      const res = await fetch(url);
-      const text = await res.text();
-      // DBLtek responds with a CSV-ish block; liveness = 200 + non-empty body.
-      const ok = res.ok && text.length > 0;
-      return { ok, details: { httpStatus: res.status, latencyMs: Date.now() - t0, body: text.slice(0, 256) }, checkedAt: new Date() };
+      const { ok, status, data } = await this.call(account, 'querylines');
+      const lines = Array.isArray(data) ? data : [];
+      // A line is only usable when the gateway is connected to the SMS Server
+      // *and* the SIM has registered with the carrier.
+      const usable = lines.filter(
+        (l: any) => String(l?.online) === '1' && String(l?.reg).toUpperCase() === 'LOGIN',
+      ).length;
+      return {
+        ok: ok && lines.length > 0 && usable > 0,
+        details: {
+          httpStatus: status,
+          latencyMs: Date.now() - t0,
+          lines: lines.length,
+          usableLines: usable,
+          // 401 here means the SMS Server credentials are wrong, which is a
+          // different problem from the gateway being unplugged.
+          ...(status === 401 ? { error: 'SMS Server rejected the credentials' } : {}),
+        },
+        checkedAt: new Date(),
+      };
     } catch (e: any) {
       return {
         ok: false,
@@ -93,91 +137,141 @@ export class GoipVendorAdapter {
     endpoint: EndpointConfig,
     account: AccountConfig,
   ): Promise<SendResult> {
-    const { baseUrl, username, password } = this.accountCreds(account);
-    const line = this.lineId(endpoint);
+    // The server takes bare numbers; a leading "+" is treated as part of the
+    // number and the send fails with no useful diagnostic.
+    const recipient = (outbound.to[0]?.e164 ?? outbound.to[0]?.raw ?? '').replace(/[^\d]/g, '');
+    if (!recipient) {
+      return {
+        externalId: null,
+        accepted: false,
+        rawResponse: null,
+        error: {
+          code: 'NO_RECIPIENT',
+          message: 'no recipient after normalisation',
+          retryable: false,
+        },
+      };
+    }
     const text = outbound.content.text ?? '';
-    const recipientRaw = outbound.to[0]?.e164 ?? outbound.to[0]?.raw ?? '';
-    const recipient = recipientRaw.replace(/^\+/, '');
+    if (!text) {
+      return {
+        externalId: null,
+        accepted: false,
+        rawResponse: null,
+        error: { code: 'EMPTY_BODY', message: 'SMS requires a text body', retryable: false },
+      };
+    }
 
-    const url =
-      `${baseUrl}/goip_sendsms.asp?Username=${encodeURIComponent(username)}` +
-      `&Password=${encodeURIComponent(password)}` +
-      `&Tel=${encodeURIComponent(recipient)}` +
-      `&Line=${line}` +
-      `&smskey=${encodeURIComponent(outbound.idempotencyKey)}` +
-      `&MsgType=text&Message=${encodeURIComponent(text)}`;
+    const body: Record<string, unknown> = { number: recipient, content: text };
+    const line = this.lineId(endpoint);
+    if (line) body.goip_line = line;
 
     try {
-      const res = await fetch(url, { method: 'POST' });
-      const body = await res.text();
-      // DBLtek returns `smsOk`/false semantics in `result` field; here we treat
-      // 200 + `ok` as accepted and use the idempotency key as external id since
-      // DBLtek's external send id isn't always exposed.
-      const accepted = res.ok && /ok/i.test(body);
-      if (!accepted) {
-        const retryable = res.status >= 500 || /fail|busy|queue|retr/i.test(body);
+      const { ok, status, data } = await this.call(account, 'sendsms', body);
+      if (status === 401) {
         return {
           externalId: null,
           accepted: false,
-          rawResponse: body,
+          rawResponse: data,
           error: {
-            code: res.status === 200 ? 'VENDOR_REJECT' : `HTTP_${res.status}`,
-            message: body.slice(0, 500),
-            retryable,
+            code: 'AUTH_FAILED',
+            message: 'SMS Server rejected the credentials',
+            retryable: false,
           },
         };
       }
+      if (!ok || !data) {
+        return {
+          externalId: null,
+          accepted: false,
+          rawResponse: data,
+          error: {
+            code: `HTTP_${status}`,
+            message: `SMS Server returned ${status}`,
+            retryable: status >= 500,
+          },
+        };
+      }
+      if (String(data.result).toUpperCase() !== 'ACCEPT') {
+        const reason = String(data.reason ?? 'unknown');
+        return {
+          externalId: null,
+          accepted: false,
+          rawResponse: data,
+          error: {
+            code: rejectCode(reason),
+            message: rejectMessage(reason),
+            // "no usable line" is a transient hardware state — the SIM may
+            // re-register — while an unknown provider is a config error.
+            retryable: reason === 'none_line',
+          },
+        };
+      }
+      // A task can fan out to many recipients, so the server keys status by
+      // "<taskID>.<number>". We send one recipient at a time, which makes that
+      // composite the stable id for querysms and for the delivery callback.
+      const taskId = String(data.taskID ?? '');
       return {
-        externalId: outbound.idempotencyKey,
+        externalId: taskId ? `${taskId}.${recipient}` : null,
         accepted: true,
-        rawResponse: body,
+        rawResponse: data,
       };
     } catch (e: any) {
       return {
         externalId: null,
         accepted: false,
         rawResponse: null,
-        error: {
-          code: 'NETWORK_ERROR',
-          message: e?.message ?? String(e),
-          retryable: true,
-        },
+        error: { code: 'NETWORK_ERROR', message: e?.message ?? String(e), retryable: true },
       };
     }
   }
 
-  /** Map a vendor delivery report to a canonical status. */
+  /**
+   * Delivery reports arrive as `{ taskID, goip_line, send, err_code?, receipt? }`,
+   * either pushed to the status URL configured in the SMS Server or returned
+   * from `querysms`. Both shapes are identical, so one parser covers both.
+   */
   normalizeStatus(_account: AccountConfig, raw: unknown): CanonicalStatus | null {
     if (!raw || typeof raw !== 'object') return null;
     const r: any = raw;
-    const status = (r.status ?? r.sms_status ?? '').toString().toLowerCase();
-    const externalId = String(r.smskey ?? r.id ?? '');
-    if (!externalId) return null;
-    switch (status) {
-      case 'sent':
-      case 'dispatched':
-        return { externalId, status: 'sent', updatedAt: new Date(), rawPayload: raw };
-      case 'delivered':
-      case 'success':
-        return { externalId, status: 'delivered', updatedAt: new Date(), rawPayload: raw };
-      case 'failed':
-      case 'fail':
-      case 'error':
-        return {
-          externalId,
-          status: 'failed',
-          updatedAt: new Date(),
-          error: { code: r.err_code?.toString() ?? 'GOIP_FAILED', message: r.err_msg?.toString() ?? 'unknown', retryable: false },
-          rawPayload: raw,
-        };
-      default:
-        return null;
-    }
+    const externalId = String(r.taskID ?? '');
+    const sendState = String(r.send ?? '').toLowerCase();
+    if (!externalId || !sendState) return null;
+
+    // `unsend` means the server has not attempted delivery yet. There is no
+    // canonical status for that, and forcing it to `unknown` would overwrite a
+    // more accurate local state — so report nothing and leave the message be.
+    const mapped: Record<string, CanonicalStatus['status']> = {
+      succeeded: 'sent',
+      failed: 'failed',
+      sending: 'sent',
+    };
+    let status = mapped[sendState];
+    if (!status) return null;
+    // `receipt: 1` is the carrier confirming the handset received it, which is
+    // a stronger statement than "the gateway sent it".
+    if (status === 'sent' && String(r.receipt ?? '') === '1') status = 'delivered';
+
+    const errCode = r.err_code ? String(r.err_code) : null;
+    return {
+      externalId,
+      status,
+      updatedAt: new Date(),
+      error:
+        status === 'failed'
+          ? {
+              code: errCode ? `CMS_${errCode}` : 'SMS_FAILED',
+              message: errCode ? cmsErrorText(errCode) : 'SMS Server reported a failure',
+              retryable: errCode ? RETRYABLE_CMS_ERRORS.has(errCode) : false,
+            }
+          : undefined,
+      rawPayload: raw,
+    };
   }
 
-  /** Inbound callback payload from DBLtek. They POST form-encoded body with
-   *  `src`, `dst`, `smskey`, `msg`, `time` (or similar). Our API ingress
-   *  decrypts the shared secret and forwards the form here.
+  /**
+   * Inbound SMS, POSTed by the SMS Server to the forwarding URL set in its
+   * System Settings: `{ goip_line, from_number, content, recv_time }`.
    */
   normalizeInbound(
     _account: AccountConfig,
@@ -186,20 +280,117 @@ export class GoipVendorAdapter {
   ): CanonicalInbound[] {
     if (!raw || typeof raw !== 'object') return [];
     const r: any = raw;
-    const src = String(r.src ?? r.Source ?? r.source ?? '');
-    const text = String(r.msg ?? r.Message ?? r.message ?? '');
-    const tsRaw = r.time ?? r.timestamp ?? r.Time;
-    const ts = typeof tsRaw === 'number' ? Number(tsRaw) : Date.now();
+    const from = String(r.from_number ?? '').trim();
+    const text = String(r.content ?? '');
+    if (!from || !text) return [];
 
-    if (!src || !text) return [];
-    return [{
-      externalId: String(r.smskey ?? r.id ?? `${src}:${ts}`),
-      from: makeAddress(src),
-      to: [makeAddress(String(endpoint.phoneE164 ?? endpoint.externalId ?? ''))],
-      type: 'text',
-      content: { text },
-      receivedAt: new Date(ts),
-      rawPayload: raw,
-    }];
+    // "YYYY-MM-DD hh:mm:ss" in the server's local timezone. A space-separated
+    // stamp parses inconsistently across engines, so normalise the separator.
+    const parsed = r.recv_time ? Date.parse(String(r.recv_time).replace(' ', 'T')) : NaN;
+    const receivedAt = Number.isNaN(parsed) ? new Date() : new Date(parsed);
+
+    return [
+      {
+        // The vendor gives inbound messages no id, so key on line, sender and
+        // timestamp — a replayed message then produces the same id and is
+        // deduplicated upstream.
+        externalId: `${r.goip_line ?? 'line'}:${from}:${receivedAt.getTime()}`,
+        from: makeAddress(from),
+        to: [makeAddress(String(endpoint.phoneE164 ?? endpoint.externalId ?? ''))],
+        type: 'text',
+        content: { text, meta: { goipLine: r.goip_line ?? null } },
+        receivedAt,
+        rawPayload: raw,
+      },
+    ];
   }
+
+  /** `querylines` — which SIMs the gateway currently has, and their state. */
+  async listLines(
+    account: AccountConfig,
+  ): Promise<
+    Array<{ line: string; online: boolean; registered: boolean; remainingSms: number | null }>
+  > {
+    const { data } = await this.call(account, 'querylines');
+    if (!Array.isArray(data)) return [];
+    return data.map((l: any) => ({
+      line: String(l?.goip_line ?? ''),
+      online: String(l?.online) === '1',
+      registered: String(l?.reg).toUpperCase() === 'LOGIN',
+      // "-1" is the vendor's way of saying "no limit".
+      remainingSms:
+        l?.remain_sms === undefined || String(l.remain_sms) === '-1' ? null : Number(l.remain_sms),
+    }));
+  }
+
+  /** `querysms` — pull the current state of a previously accepted send. */
+  async queryStatus(account: AccountConfig, externalId: string): Promise<CanonicalStatus | null> {
+    const { data } = await this.call(account, 'querysms', { taskID: externalId });
+    if (!Array.isArray(data) || data.length === 0) return null;
+    return this.normalizeStatus(account, data[0]);
+  }
+}
+
+function rejectCode(reason: string): string {
+  switch (reason) {
+    case 'none_line':
+      return 'NO_USABLE_LINE';
+    case 'none_provider':
+      return 'UNKNOWN_PROVIDER';
+    default:
+      return 'SEND_REJECTED';
+  }
+}
+
+function rejectMessage(reason: string): string {
+  switch (reason) {
+    case 'none_line':
+      return 'Немає доступної лінії: SIM не зареєстрована в мережі або SMS вимкнено';
+    case 'none_provider':
+      return 'Оператора з такою назвою не налаштовано в SMS-сервері';
+    default:
+      return `SMS-сервер відхилив запит: ${reason}`;
+  }
+}
+
+/**
+ * GSM failures that may succeed on a later attempt. Everything else in the CMS
+ * error table describes a permanent condition — a barred or unassigned number,
+ * an unsupported message type — where retrying only burns SIM credit.
+ */
+const RETRYABLE_CMS_ERRORS = new Set([
+  '17', // Network failure
+  '38', // Network out of order
+  '41', // Temporary failure
+  '42', // Congestion
+  '47', // Resources unavailable
+  '192', // SC busy
+  '194', // SC system failure
+  '331', // no network service
+  '332', // network timeout
+]);
+
+/** A few codes worth naming; the rest surface as-is for the operator to look up. */
+const CMS_ERRORS: Record<string, string> = {
+  '1': 'Номер не існує',
+  '8': 'Заблоковано оператором',
+  '17': 'Збій мережі',
+  '21': 'Оператор відхилив повідомлення',
+  '27': 'Абонент недоступний',
+  '28': 'Невідомий абонент',
+  '38': 'Мережа недоступна',
+  '41': 'Тимчасовий збій',
+  '42': 'Перевантаження мережі',
+  '208': 'Пам’ять SIM для SMS переповнена',
+  '310': 'SIM не вставлено',
+  '311': 'Потрібен PIN SIM',
+  '313': 'Збій SIM',
+  '322': 'Пам’ять переповнена',
+  '330': 'Невідома адреса SMSC',
+  '331': 'Немає мережі',
+  '332': 'Тайм-аут мережі',
+};
+
+function cmsErrorText(code: string): string {
+  return CMS_ERRORS[code] ?? `Помилка GSM, код CMS ${code}`;
 }

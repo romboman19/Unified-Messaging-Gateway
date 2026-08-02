@@ -1,0 +1,76 @@
+# DBLtek GoIP SMS Server v1.30.x (TZ §21, ADR-003).
+#
+# The vendor ships a LAMP application plus a closed-source daemon, installed by
+# a shell script that expects to own the whole host — it appends to Apache's
+# config, writes /etc/rc.local and opens firewall ports. None of that belongs in
+# a container, so this image reproduces what the script *does* rather than
+# running it: unpack the archive, point the app at our MySQL, and run the two
+# processes ourselves.
+#
+# PHP 5.6 is not a preference. Three of the vendor's PHP files call
+# `mysql_connect`, removed in PHP 7, and patching vendor code we cannot test
+# against real hardware would be worse than pinning the runtime they support.
+#
+# The archive is NOT vendored into this repository: DBLtek restricts
+# redistribution (docs/licensing/third-party.md). It is fetched at build time
+# and checked against a pinned digest, so a silently changed upstream fails the
+# build instead of shipping.
+FROM php:5.6-apache
+
+ARG GOIP_ARCHIVE_URL=http://dbltek.com/update/goip_install-latest.tar.gz
+ARG GOIP_ARCHIVE_SHA256=aa23a30e6260c29d947aebb34e0ede7b6df678be312acacc4547f35f18254b27
+
+# php:5.6 is built on Debian 9 (stretch), whose mirrors are retired — apt only
+# works against archive.debian.org, and both its Release files and the signing
+# keys have long expired. `trusted=yes` is the only way to install from it. The
+# exposure is bounded: this happens at build time against a pinned base image,
+# and nothing here is on a path the internet can reach at runtime.
+RUN set -eux; \
+    printf '%s\n' \
+      'deb [trusted=yes] http://archive.debian.org/debian stretch main' \
+      'deb [trusted=yes] http://archive.debian.org/debian-security stretch/updates main' \
+      > /etc/apt/sources.list; \
+    printf 'Acquire::Check-Valid-Until "false";\n' > /etc/apt/apt.conf.d/99no-check-valid-until
+
+# `mysql` is the extension the vendor code uses; `mysqli` covers the one file
+# that was already modernised. The client binary lets the entrypoint seed the
+# schema.
+RUN set -eux; \
+    docker-php-ext-install mysql mysqli > /dev/null; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+      mysql-client libmariadbclient18 ca-certificates curl procps; \
+    rm -rf /var/lib/apt/lists/*
+
+# The vendor's goipcron binary links against libmysqlclient.so.18 from the
+# MySQL 5.6 era, which Debian no longer ships. MariaDB's client library is a
+# drop-in for that ABI, so point the old soname at it rather than hunting down
+# an unmaintained MySQL package.
+RUN ln -s /usr/lib/x86_64-linux-gnu/libmariadbclient.so.18 \
+          /usr/lib/x86_64-linux-gnu/libmysqlclient.so.18
+
+WORKDIR /tmp/build
+RUN set -eux; \
+    curl -fsSL -o goip.tar.gz "${GOIP_ARCHIVE_URL}"; \
+    echo "${GOIP_ARCHIVE_SHA256}  goip.tar.gz" | sha256sum -c -; \
+    tar xzf goip.tar.gz; \
+    mv goip_install/goip /usr/local/goip; \
+    rm -rf /tmp/build
+
+# The app expects to be reachable at /goip, which is also what the GoIP
+# hardware and the vendor's own API paths assume.
+RUN set -eux; \
+    ln -s /usr/local/goip /var/www/html/goip; \
+    chmod -R 777 /usr/local/goip; \
+    mv /usr/local/goip/goipcron_x64 /usr/local/goip/goipcron; \
+    chmod +x /usr/local/goip/goipcron
+
+COPY dbltek-sms/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+# 80  — web UI and the JSON API UMG calls
+# 44444/udp — where GoIP hardware registers and delivers messages
+EXPOSE 80 44444/udp
+
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["apache2-foreground"]
