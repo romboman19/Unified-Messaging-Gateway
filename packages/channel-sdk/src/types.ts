@@ -32,6 +32,31 @@ export interface CanonicalContent {
     size?: number;
     sha256?: string;
   };
+  /**
+   * Vendor-side handles for files that still need downloading. Sidecars hand
+   * us a reference — a Signal attachment id, a gwmd path under its statics
+   * dir — rather than the bytes, and those references are short-lived: gwmd
+   * keeps media in the container's writable layer, and Signal drops it once
+   * the queue is drained. The worker resolves each ref through
+   * `ChannelAdapter.fetchInboundMedia` and stores an `Attachment`.
+   */
+  attachments?: Array<{
+    /**
+     * Inbound: opaque, adapter-specific handle only that adapter can resolve.
+     * Empty on outbound, where `data` carries the payload instead.
+     */
+    ref?: string;
+    /**
+     * Outbound: the bytes to send. The worker reads them out of UMG storage
+     * before dispatch, so adapters never touch the filesystem and each one
+     * can encode them however its transport wants — base64 for Signal, a
+     * multipart part for gwmd.
+     */
+    data?: Uint8Array;
+    mime?: string;
+    filename?: string;
+    size?: number;
+  }>;
   /** Voice note specific flag. */
   voice?: boolean;
   /** Reaction emoji (for `reaction` messages). */
@@ -62,6 +87,13 @@ export type CanonicalMessageType =
 
 /** Inbound message handed to the core by an adapter. */
 export interface CanonicalInbound {
+  /**
+   * Which way the message went. Defaults to `inbound`; set to `outbound` for
+   * messages the operator sent from their own device that the transport
+   * mirrors back to us (Signal sync messages). Without this the web shows
+   * only one side of the conversation.
+   */
+  direction?: 'inbound' | 'outbound';
   /** Vendor's transport-side id (used for dedupe `(endpoint_id, external_id)`). */
   externalId: string;
   /** Sender. */

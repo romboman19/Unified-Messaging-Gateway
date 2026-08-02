@@ -86,6 +86,16 @@ export interface ChannelAdapter {
     imageUrl: string,
   ): Promise<{ bytes: Uint8Array; contentType: string }>;
 
+  /**
+   * Download an inbound attachment the sidecar is holding, given a `ref` from
+   * `CanonicalContent.attachments`. Implemented by adapters whose transport
+   * delivers files by reference rather than inline.
+   */
+  fetchInboundMedia?(
+    account: AccountConfig,
+    ref: string,
+  ): Promise<{ bytes: Uint8Array; contentType: string; fileName: string }>;
+
   /** List devices/accounts already linked on the sidecar (reconcile orphans). */
   listProvisionedAccounts?(account: AccountConfig): Promise<ProvisionedAccount[]>;
 

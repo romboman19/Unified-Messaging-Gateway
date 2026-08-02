@@ -6,9 +6,15 @@ import {
   MessageType,
   Prisma,
 } from '@umg/database';
-import type { AccountConfig, CanonicalInbound, EndpointConfig } from '@umg/channel-sdk';
+import type {
+  AccountConfig,
+  CanonicalInbound,
+  ChannelAdapter,
+  EndpointConfig,
+} from '@umg/channel-sdk';
 import { AdaptersRegistry } from '../adapters/adapters.registry';
 import { EventsService } from '../events/events.service';
+import { InboundMediaService } from './inbound-media.service';
 
 /**
  * Turns a raw vendor payload into persisted inbound messages (TZ §15.1).
@@ -31,6 +37,7 @@ export class InboundIngestService {
     @Inject('PRISMA') private readonly prisma: PrismaClient,
     private readonly adapters: AdaptersRegistry,
     private readonly events: EventsService,
+    private readonly media: InboundMediaService,
   ) {}
 
   /**
@@ -84,7 +91,7 @@ export class InboundIngestService {
 
     let stored = 0;
     for (const inbound of canonical) {
-      if (await this.persist(inbound, endpoint, account)) stored++;
+      if (await this.persist(inbound, endpoint, account, adapter, accountConfig)) stored++;
     }
     return stored;
   }
@@ -128,14 +135,19 @@ export class InboundIngestService {
     inbound: CanonicalInbound,
     endpoint: { id: string; accountId: string },
     account: { id: string; type: string },
+    adapter: ChannelAdapter,
+    accountConfig: AccountConfig,
   ): Promise<boolean> {
     const externalId = inbound.externalId || null;
+    const direction =
+      inbound.direction === 'outbound' ? MessageDirection.outbound : MessageDirection.inbound;
 
     // The same message can arrive twice: vendors retry webhooks, and the
-    // Signal bridge replays its queue after a reconnect.
+    // Signal bridge replays its queue after a reconnect. Our own sync'd
+    // messages also collide with the copy we stored when we sent them.
     if (externalId) {
       const existing = await this.prisma.message.findFirst({
-        where: { endpointId: endpoint.id, externalId, direction: MessageDirection.inbound },
+        where: { endpointId: endpoint.id, externalId },
         select: { id: true },
       });
       if (existing) {
@@ -145,8 +157,10 @@ export class InboundIngestService {
     }
 
     const channelType = account.type as never;
-    const peerPhone = inbound.from.e164 ?? null;
-    const peerRaw = inbound.from.raw ?? null;
+    const counterparty =
+      direction === MessageDirection.outbound ? inbound.to[0] : inbound.from;
+    const peerPhone = counterparty?.e164 ?? null;
+    const peerRaw = counterparty?.raw ?? null;
 
     const conversation = await this.findOrCreateConversation(
       endpoint.id,
@@ -157,15 +171,15 @@ export class InboundIngestService {
 
     const message = await this.prisma.message.create({
       data: {
-        direction: MessageDirection.inbound,
+        direction,
         channelType,
         accountId: endpoint.accountId,
         endpointId: endpoint.id,
         conversationId: conversation.id,
         externalId,
         messageType: toMessageType(inbound.type),
-        // Inbound messages have no delivery lifecycle of their own; they are
-        // terminal on arrival.
+        // Neither an arrival nor a mirrored copy has a delivery lifecycle we
+        // drive; both are terminal by the time we see them.
         status: MessageStatus.delivered,
         fromJson: inbound.from as unknown as Prisma.InputJsonValue,
         toJson: inbound.to as unknown as Prisma.InputJsonValue,
@@ -181,6 +195,10 @@ export class InboundIngestService {
       data: { lastMessageAt: inbound.receivedAt ?? new Date() },
     });
 
+    // Pull the files down before the sidecar loses them. Done after the
+    // message row exists so an attachment always has something to hang off.
+    await this.media.storeFor(message.id, inbound.content ?? {}, adapter, accountConfig);
+
     await this.events.emit({
       type: 'message.received',
       aggregateId: message.id,
@@ -192,7 +210,7 @@ export class InboundIngestService {
       data: {
         message: {
           id: message.id,
-          direction: 'inbound',
+          direction,
           channel_type: channelType,
           external_id: externalId,
           message_type: message.messageType,
@@ -206,7 +224,8 @@ export class InboundIngestService {
     });
 
     this.logger.log(
-      `Stored inbound ${message.messageType} ${message.id} from ${peerPhone ?? peerRaw ?? 'unknown'}`,
+      `Stored ${direction} ${message.messageType} ${message.id} ` +
+        `with ${peerPhone ?? peerRaw ?? 'unknown'}`,
     );
     return true;
   }

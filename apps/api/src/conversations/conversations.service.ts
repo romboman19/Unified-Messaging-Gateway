@@ -69,6 +69,10 @@ export class ConversationsService {
             take: 1,
             select: { result: true, errorJson: true },
           },
+          attachments: {
+            where: { deletedAt: null },
+            select: { id: true, fileName: true, mimeType: true, sizeBytes: true },
+          },
         },
       }),
       this.prisma.message.count({ where: { conversationId: id } }),

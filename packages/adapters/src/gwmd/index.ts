@@ -129,10 +129,12 @@ export class GwmdAdapter {
     // `X-Device-Id` header (middleware/device.go), NOT by a path segment.
     // The media kind selects the route — text, image and file are separate.
     const media = outbound.content.media;
-    const route = !media ? 'message'
-      : media.mime?.startsWith('image/') ? 'image'
-      : media.mime?.startsWith('video/') ? 'video'
-      : media.mime?.startsWith('audio/') ? 'audio'
+    const attachment = (outbound.content.attachments ?? []).find((a) => a.data?.length);
+    const mime = media?.mime ?? attachment?.mime;
+    const route = !media && !attachment ? 'message'
+      : mime?.startsWith('image/') ? 'image'
+      : mime?.startsWith('video/') ? 'video'
+      : mime?.startsWith('audio/') ? 'audio'
       : 'file';
     const url = `${this.baseUrl(account)}/app/send/${route}`;
     const recipient = outbound.to[0]?.e164 ?? outbound.to[0]?.raw ?? '';
@@ -144,8 +146,8 @@ export class GwmdAdapter {
       payload['reply_message_id'] = outbound.content.replyToMessageId;
     }
     if (media?.url) {
-      // Media routes take a remote URL under a per-route field and carry the
-      // accompanying text as `caption`.
+      // The media routes also accept a remote URL, which is what we use when
+      // the caller supplied a link rather than a file.
       payload[route === 'file' ? 'file_url' : `${route}_url`] = media.url;
       payload['caption'] = outbound.content.text ?? '';
     }
@@ -153,14 +155,40 @@ export class GwmdAdapter {
       payload['reaction'] = outbound.content.reaction;
       payload['message_id'] = outbound.content.replyToMessageId;
     }
+
+    // gwmd's media routes are form endpoints: the file goes up as a multipart
+    // part named after the route. Sending bytes directly avoids handing the
+    // sidecar a URL it would have to authenticate back to us to fetch.
+    const upload = (outbound.content.attachments ?? []).find((a) => a.data?.length);
+    let requestBody: FormData | string;
+    const headers: Record<string, string> = {
+      ...this.authHeaders(account),
+      'x-device-id': encodeURIComponent(deviceId),
+    };
+    if (upload) {
+      const form = new FormData();
+      for (const [k, v] of Object.entries(payload)) form.append(k, String(v ?? ''));
+      form.append('caption', outbound.content.text ?? '');
+      form.append(
+        route === 'message' ? 'file' : route,
+        new Blob([upload.data!], { type: upload.mime ?? 'application/octet-stream' }),
+        upload.filename ?? 'attachment',
+      );
+      requestBody = form;
+      // Let fetch set the multipart boundary itself.
+      delete headers['content-type'];
+    } else {
+      requestBody = JSON.stringify(payload);
+    }
+
     try {
       const res = await fetch(url, {
         method: 'POST',
         // gwmd runs url.QueryUnescape over X-Device-Id (middleware/device.go),
         // so the value has to be encoded to survive intact. Legacy endpoints
         // whose id literally contains "%2B" only resolve this way.
-        headers: { ...this.authHeaders(account), 'x-device-id': encodeURIComponent(deviceId) },
-        body: JSON.stringify(payload),
+        headers,
+        body: requestBody,
       });
       const raw: any = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -233,6 +261,13 @@ export class GwmdAdapter {
     const from = makeAddress(jidToPhone(String(m.from ?? '')) ?? String(m.from ?? ''));
     const to = [makeAddress(String(endpoint.phoneE164 ?? endpoint.externalId ?? ''))];
     const media = m.image ?? m.video ?? m.audio ?? m.document ?? m.sticker ?? m.video_note;
+    // With --auto-download-media (the default) gwmd saves the decrypted file
+    // under `statics/media/…` and reports either that bare path or
+    // `{ path, caption }`. With auto-download off it reports WhatsApp's own
+    // encrypted CDN url, which is useless without the message keys — so only
+    // a local path is a usable reference.
+    const mediaPath =
+      typeof media === 'string' ? media : (media?.path ?? media?.media_path ?? null);
     const type: CanonicalInbound['type'] =
       m.reaction ? 'reaction' :
       m.image ? 'image' :
@@ -253,10 +288,19 @@ export class GwmdAdapter {
         // or an object carrying url/mime/filename.
         media: hasMedia
           ? {
-              url: typeof media === 'string' ? media : (media?.url ?? media?.media_path),
+              url: typeof media === 'string' ? undefined : media?.url,
               mime: typeof media === 'string' ? undefined : media?.mime_type,
               filename: typeof media === 'string' ? undefined : media?.file_name,
             }
+          : undefined,
+        attachments: mediaPath
+          ? [
+              {
+                ref: String(mediaPath),
+                mime: typeof media === 'string' ? undefined : media?.mime_type,
+                filename: String(mediaPath).split('/').pop(),
+              },
+            ]
           : undefined,
         reaction: typeof m.reaction === 'string' ? m.reaction : m.reaction?.emoji,
         replyToMessageId: m.replied_to_id ?? m.reacted_message_id,
@@ -396,6 +440,37 @@ export class GwmdAdapter {
       uri: qrLink,
       imageUrl: qrLink,
       ttlSeconds: Number(results.qr_duration ?? 60),
+    };
+  }
+
+  /**
+   * Fetch an inbound attachment gwmd has already decrypted to disk. Its media
+   * lives under `statics/`, which the sidecar serves at `<base-path>/statics`
+   * — and which is NOT on a persistent volume, so the file disappears when the
+   * container is recreated. Downloading promptly is the only way to keep it.
+   */
+  async fetchInboundMedia(
+    account: AccountConfig,
+    ref: string,
+  ): Promise<{ bytes: Uint8Array; contentType: string; fileName: string }> {
+    // `ref` is a path relative to gwmd's working directory, e.g.
+    // "statics/media/1785-abc.jpg". Refuse anything trying to climb out of it.
+    const clean = ref.replace(/^\/+/, '');
+    if (!clean.startsWith('statics/') || clean.includes('..')) {
+      throw new Error(`gwmd media ref is not a statics path: ${ref}`);
+    }
+    const url = `${this.baseUrl(account)}/app/${clean}`;
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: this.authHeader(account) ? { authorization: this.authHeader(account)! } : {},
+    });
+    if (!res.ok) {
+      throw new Error(`gwmd media ${clean} returned ${res.status}`);
+    }
+    return {
+      bytes: new Uint8Array(await res.arrayBuffer()),
+      contentType: res.headers.get('content-type') ?? 'application/octet-stream',
+      fileName: clean.split('/').pop() ?? 'attachment',
     };
   }
 

@@ -129,8 +129,19 @@ export class SignalCliRestApiAdapter {
       number,
       recipients,
     };
-    if (outbound.content.media?.url) {
-      body.base64_attachments = [outbound.content.media.url];
+    // `base64_attachments` takes the file *contents*, not a link. The old code
+    // put a URL here, so every media send either failed or delivered garbage.
+    // Accepted forms are documented on SendMessageV2; we use the richest one so
+    // the recipient sees the original filename and type.
+    const files = (outbound.content.attachments ?? []).filter((a) => a.data?.length);
+    if (files.length > 0) {
+      body.base64_attachments = files.map((a) => {
+        const b64 = Buffer.from(a.data!).toString('base64');
+        const mime = a.mime ?? 'application/octet-stream';
+        return a.filename
+          ? `data:${mime};filename=${a.filename};base64,${b64}`
+          : `data:${mime};base64,${b64}`;
+      });
     }
     if (outbound.content.meta?.['link_preview']) {
       body.link_preview = outbound.content.meta['link_preview'];
@@ -282,23 +293,71 @@ export class SignalCliRestApiAdapter {
   ): CanonicalInbound[] {
     if (!raw || typeof raw !== 'object') return [];
     const r: any = raw;
-    if (!r.envelope || !r.envelope.dataMessage) return [];
-    const dm = r.envelope.dataMessage;
+    if (!r.envelope) return [];
+    // A linked device sees two kinds of message. `dataMessage` is someone
+    // writing to us. `syncMessage.sentMessage` is the operator writing from
+    // their own phone, mirrored here — same conversation, opposite direction.
+    // Ignoring the latter leaves the web showing only half of every thread.
+    const sent = r.envelope.syncMessage?.sentMessage;
+    const dm = r.envelope.dataMessage ?? sent;
+    if (!dm) return [];
+    const isOwn = !r.envelope.dataMessage && !!sent;
     const ts = Number(r.envelope.timestamp ?? dm.timestamp ?? Date.now());
-    const from = makeAddress(String(r.envelope.source ?? r.envelope.sourceNumber ?? ''));
-    const to = [makeAddress(String(this.endpointNumber(endpoint)))];
+    const self = String(this.endpointNumber(endpoint));
+    // For our own sync'd message the peer is the destination, not the source.
+    const peer = isOwn
+      ? String(dm.destinationNumber ?? dm.destination ?? '')
+      : String(r.envelope.source ?? r.envelope.sourceNumber ?? '');
+    const from = makeAddress(isOwn ? self : peer);
+    const to = [makeAddress(isOwn ? peer : self)];
+    // signal-cli hands over attachment *ids*; the bytes stay on the sidecar
+    // until fetched via /v1/attachments/{id}.
+    const attachments = Array.isArray(dm.attachments)
+      ? dm.attachments
+          .filter((a: any) => a?.id)
+          .map((a: any) => ({
+            ref: String(a.id),
+            mime: a.contentType ? String(a.contentType) : undefined,
+            filename: a.filename ? String(a.filename) : undefined,
+            size: typeof a.size === 'number' ? a.size : undefined,
+          }))
+      : [];
+    const first = attachments[0];
     return [{
+      direction: isOwn ? 'outbound' : 'inbound',
       externalId: String(ts),
       from,
       to,
-      type: dm.message ? 'text' : (dm.attachments?.length ? 'document' : 'unknown'),
+      type: signalMessageType(dm, first?.mime),
       content: {
         text: dm.message ?? undefined,
+        attachments: attachments.length > 0 ? attachments : undefined,
+        media: first
+          ? { mime: first.mime, filename: first.filename, size: first.size }
+          : undefined,
+        voice: dm.attachments?.some((a: any) => a?.voiceNote === true) || undefined,
         meta: dm.groupContext ? { groupId: r.envelope.dataMessage.groupContext.id ?? r.envelope.dataMessage.groupContext.groupId } : undefined,
       },
       receivedAt: new Date(ts),
       rawPayload: raw,
     }];
+  }
+
+  /** `GET /v1/attachments/{id}` — pull an inbound attachment's bytes. */
+  async fetchInboundMedia(
+    account: AccountConfig,
+    ref: string,
+  ): Promise<{ bytes: Uint8Array; contentType: string; fileName: string }> {
+    const url = `${this.baseUrl(account)}/v1/attachments/${encodeURIComponent(ref)}`;
+    const res = await fetch(url, { method: 'GET' });
+    if (!res.ok) {
+      throw new Error(`signal-cli attachment ${ref} returned ${res.status}`);
+    }
+    return {
+      bytes: new Uint8Array(await res.arrayBuffer()),
+      contentType: res.headers.get('content-type') ?? 'application/octet-stream',
+      fileName: ref,
+    };
   }
 
   // ─── Provisioning (TZ §1038) — Signal linked-device via QR ────────────
@@ -441,4 +500,15 @@ export class SignalCliRestApiAdapter {
       );
     }
   }
+}
+
+/** Picks a canonical type from the Signal data message and its first attachment. */
+function signalMessageType(dm: any, mime?: string): CanonicalInbound['type'] {
+  if (!dm?.attachments?.length) return dm?.message ? 'text' : 'unknown';
+  if (dm.attachments.some((a: any) => a?.voiceNote === true)) return 'voice';
+  if (!mime) return 'document';
+  if (mime.startsWith('image/')) return 'image';
+  if (mime.startsWith('video/')) return 'video';
+  if (mime.startsWith('audio/')) return 'audio';
+  return 'document';
 }
