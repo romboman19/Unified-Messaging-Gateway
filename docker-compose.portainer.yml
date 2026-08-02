@@ -1,11 +1,8 @@
 # Single-file stack for Portainer (and anything else that deploys one compose
 # file).
 #
-# GENERATED — do not edit. Regenerate after changing either source file:
-#
-#   docker compose -f docker-compose.yml -f docker-compose.prod.yml \
-#     config --no-interpolate > docker-compose.portainer.yml
-#   # then make the build contexts relative again
+# GENERATED — do not edit. Regenerate with:
+#   bash infra/scripts/gen-portainer-compose.sh
 #
 # Why this exists: the stack is normally two files, because the base defines
 # dev stubs and the prod override swaps in the real vendor images using the
@@ -13,9 +10,9 @@
 # merging, and Portainer deploys a single file — so the merge is done here
 # ahead of time.
 #
-# Secrets are NOT baked in: `--no-interpolate` keeps every ${VAR} placeholder,
-# so values come from Portainer's environment variables, exactly as they would
-# from .env. Fill in the same set listed in .env.example.
+# Secrets are NOT baked in: every ${VAR} is a placeholder, filled from
+# Portainer's environment variables exactly as it would be from .env. The
+# variables to set are listed in .env.example.
 
 name: umg
 networks:
@@ -205,7 +202,7 @@ services:
       - bind:
           create_host_path: true
         read_only: true
-        source: /srv/umg/infra/docker/nginx-reverse-proxy.conf
+        source: ./infra/docker/nginx-reverse-proxy.conf
         target: /etc/nginx/conf.d/default.conf
         type: bind
   signal-cli:
