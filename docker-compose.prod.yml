@@ -167,6 +167,10 @@ services:
       # its grants, which the application user cannot do.
       SMS_DB_ROOT_PASSWORD: ${SMS_DB_ROOT_PASSWORD:?set in .env}
       SMS_GOIPCRON_PORT: "44444"
+      # The container builds its own forwarding URL from this; SMS_FORWARD_URL
+      # stays available as an explicit override for unusual deployments.
+      DBSMS_WEBHOOK_SECRET: ${DBSMS_WEBHOOK_SECRET:?set in .env}
+      UMG_API_URL: ${UMG_API_URL:-http://umg-api:4000}
       SMS_FORWARD_URL: ${SMS_FORWARD_URL:-}
       TZ: Europe/Kyiv
     ports:
