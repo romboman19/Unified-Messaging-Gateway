@@ -50,7 +50,9 @@ EP_ID=$(echo "$RES" | python3 -c 'import sys,json; print(json.load(sys.stdin)["e
 URI=$(echo "$RES" | python3 -c 'import sys,json; print(json.load(sys.stdin)["uri"])')
 
 echo "── 4. Verify URI shape ──"
-if [[ ! "$URI" =~ ^signalcaptcha:// ]]; then
+# signal-cli's linked-device URI. `signalcaptcha://` is an unrelated scheme
+# (the registration captcha) and was never a valid pairing target.
+if [[ ! "$URI" =~ ^sgnl://linkdevice ]]; then
   echo "FAIL: URI shape wrong: $URI" >&2
   exit 1
 fi
@@ -82,7 +84,7 @@ if [[ "$STATE" != "linked" ]]; then
   exit 1
 fi
 
-echo "── 7. Verify endpoint row carries uuid + phoneE164 + externalId ──"
+echo "── 7. Verify endpoint row carries phoneE164 + externalId ──"
 curl -sS -b "$COOKIE" "$BASE/api/v1/transport-accounts" \
   | python3 -c "
 import sys, json
@@ -90,8 +92,9 @@ d = json.load(sys.stdin)
 ep = [e for a in d for e in a['endpoints'] if e['id']=='$EP_ID'][0]
 assert ep['registrationState']=='linked', ep
 assert ep['phoneE164'], ep
-assert ep['uuid'], ep
 assert ep['externalId'], ep
+# uuid is deliberately NOT asserted: the real sidecar's /v1/accounts returns
+# bare phone numbers, so there is no uuid to record for a Signal endpoint.
 print('  OK —', json.dumps(ep, indent=2, ensure_ascii=False))
 "
 

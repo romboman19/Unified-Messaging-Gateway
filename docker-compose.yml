@@ -49,11 +49,12 @@ services:
       DBSMS_BASE_URL: ${DBSMS_BASE_URL:-http://dbsms-vendor:8080}
       DBSMS_USERNAME: ${DBSMS_USERNAME:-admin}
       DBSMS_PASSWORD: ${DBSMS_PASSWORD:-change-me}
-      UNOAPI_BASE_URL: ${UNOAPI_BASE_URL:-http://unoapi:9876}
-      UNOAPI_API_KEY: ${UNOAPI_API_KEY:-change-me}
+      UNOAPI_BASE_URL: ${UNOAPI_BASE_URL:-}
+      UNOAPI_API_KEY: ${UNOAPI_API_KEY:-}
       GWMD_BASE_URL: ${GWMD_BASE_URL:-http://gwmd:3000}
       GWMD_USERNAME: ${GWMD_USERNAME:-umg}
       GWMD_PASSWORD: ${GWMD_PASSWORD:-change-me}
+      GWMD_WEBHOOK_SECRET: ${GWMD_WEBHOOK_SECRET:-}
       SIGNAL_BASE_URL: ${SIGNAL_BASE_URL:-http://signal-cli:8080}
     volumes:
       - umg-media-data:/data/media
@@ -88,11 +89,12 @@ services:
       DBSMS_BASE_URL: ${DBSMS_BASE_URL:-http://dbsms-vendor:8080}
       DBSMS_USERNAME: ${DBSMS_USERNAME:-admin}
       DBSMS_PASSWORD: ${DBSMS_PASSWORD:-change-me}
-      UNOAPI_BASE_URL: ${UNOAPI_BASE_URL:-http://unoapi:9876}
-      UNOAPI_API_KEY: ${UNOAPI_API_KEY:-change-me}
+      UNOAPI_BASE_URL: ${UNOAPI_BASE_URL:-}
+      UNOAPI_API_KEY: ${UNOAPI_API_KEY:-}
       GWMD_BASE_URL: ${GWMD_BASE_URL:-http://gwmd:3000}
       GWMD_USERNAME: ${GWMD_USERNAME:-umg}
       GWMD_PASSWORD: ${GWMD_PASSWORD:-change-me}
+      GWMD_WEBHOOK_SECRET: ${GWMD_WEBHOOK_SECRET:-}
       SIGNAL_BASE_URL: ${SIGNAL_BASE_URL:-http://signal-cli:8080}
     volumes:
       - umg-media-data:/data/media

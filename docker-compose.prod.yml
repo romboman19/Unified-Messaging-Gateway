@@ -6,17 +6,11 @@
 # Usage:
 #   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 #
-# Persistent volumes `umg-signal-data`, `umg-gwmd-data` and
-# `umg-unoapi-data` are reused so existing linked-device keys / WhatsApp
-# session creds survive the switch.
+# Persistent volumes `umg-signal-data` and `umg-gwmd-data` are reused so
+# existing linked-device keys / WhatsApp session creds survive the switch.
 #
-# WhatsApp is split into two sidecars:
-#   - `gwmd`    (primary, MIT):  the wizard-driven QR pairing flow. Use this
-#                                for any new WhatsApp number.
-#   - `unoapi`  (legacy, GPL-3): kept so existing endpoints continue to work
-#                                after migration. Can be disabled later by
-#                                dropping the service block and removing the
-#                                UNOAPI_BASE_URL env var.
+# WhatsApp runs on one sidecar, `gwmd` (MIT), which drives the wizard's QR
+# pairing flow. UnoAPI is parked — see the note on its service block below.
 #
 # TZ §1038 narrows UnoAPI: UnoAPI Cloud 2.x no longer returns QR codes via
 # JSON HTTP — pairing is mediated by a socket.io WebSocket only. gwmd gives
@@ -25,28 +19,48 @@
 services:
   gwmd:
     build: !reset null
-    image: aldinokemal/go-whatsapp-web-multidevice:latest
+    # The publisher's Docker Hub namespace is `aldinokemal2104`; the bare
+    # `aldinokemal/...` repository does not exist.
+    image: aldinokemal2104/go-whatsapp-web-multidevice:latest
     container_name: umg-gwmd
+    # `rest` is the subcommand the image's CMD supplies by default — it must
+    # be repeated here, since `command:` replaces CMD wholesale.
     command:
-      - "--app-base-path=/app"
+      - "rest"
+      # Released binaries call this `--base-path`; the flag was named
+      # `--app-base-path` only on the development branch.
+      - "--base-path=/app"
       - "--port=3000"
-      - "--autoreply=Welcome to UMG."
-      # gwmd expects HTTP basic auth on its REST surface when WEBHOOK_USERNAME
-      # / WEBHOOK_PASSWORD are set. Configure here so the gwmd adapter's
-      # `Authorization` header lines up.
-      - "--basic-auth=$(GWMD_USERNAME):$(GWMD_PASSWORD)"
+      # The bundled dashboard is fetched from GitHub at runtime. We never
+      # use it and would rather not pull executable UI over the wire.
+      - "--ui-enabled=false"
+      - "--ui-auto-update=false"
+      # Inbound messages have no other way in: WhatsApp gives us a webhook,
+      # not a queue to poll. Without this the sidecar logs "Forwarding
+      # message to 0 configured webhook(s)" and the message is simply lost.
+      - "--webhook=http://umg-api:4000/api/v1/webhooks/gwmd"
+      - "--webhook-secret=${GWMD_WEBHOOK_SECRET:?set in .env}"
+      # Basic auth guards the REST surface; the gwmd adapter sends the same
+      # credentials from `account.configJson`. Compose only interpolates
+      # `${VAR}` — `$(VAR)` would be passed through as a literal.
+      - "--basic-auth=${GWMD_USERNAME:-umg}:${GWMD_PASSWORD:?set in .env}"
     environment:
       TZ: Europe/Kyiv
-      GWMD_USERNAME: ${GWMD_USERNAME:-umg}
-      GWMD_PASSWORD: ${GWMD_PASSWORD:?set in .env}
-      # Path under which gwmd persists whatsmeow session data; bind-mount
-      # the `umg-gwmd-data` volume so containers can be recreated without
-      # losing paired numbers.
-      WHATSAPP_DATA_PATH: /home/gwmd/whatsapp
-    volumes:
-      - umg-gwmd-data:/home/gwmd/whatsapp
+    # `!override` replaces the base file's stub mount. Without it Compose
+    # appends, leaving the same volume mounted at two different paths.
+    volumes: !override
+      # gwmd's WORKDIR is /app and it keeps the whatsmeow session DB under
+      # `storages/` relative to it (config.PathStorages). Mounting anywhere
+      # else means paired numbers are lost on every container recreate.
+      - umg-gwmd-data:/app/storages
     networks:
       - transports
+      # Signal and WhatsApp sidecars must reach their providers' servers:
+      # signal-cli's `startLink` fails with "Link request error: Connection
+      # closed!" without egress, and whatsmeow cannot open its socket. The
+      # `transports` network stays internal so the GoIP vendor container
+      # keeps its no-egress guarantee (ADR-002).
+      - transports-egress
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/health >/dev/null"]
@@ -55,30 +69,16 @@ services:
       retries: 10
       start_period: 60s
 
+  # UnoAPI is parked, not deployed. gwmd is the WhatsApp sidecar (TZ §1038):
+  # UnoAPI Cloud 2.x pairs over a socket.io WebSocket instead of returning a
+  # QR over HTTP, so the wizard cannot drive it. Running the dev stub in
+  # production would put a WhatsApp channel in the admin's Channels list that
+  # can never actually pair — the profile keeps it out of `up` entirely.
+  # To bring it back: write a real config (it is a Node/Redis service, not
+  # Java/H2), drop the profile, and set UNOAPI_BASE_URL in .env so the API
+  # seeds the account again.
   unoapi:
-    build: !reset null
-    image: clairton/unoapi-cloud:2.11.7
-    container_name: umg-unoapi
-    environment:
-      TZ: Europe/Kyiv
-      # UnoAPI uses SQL Server by default; we point it at the embedded
-      # H2 default for dev-ish sizing. For real prod, set DATABASE_URL to
-      # a managed Postgres in ADR §23's runbook.
-      DATABASE_DRIVER: h2
-      DATABASE_URL: jdbc:h2:./data/unoapi;AUTO_SERVER=TRUE
-      # Disable outbound integrations not used by UMG.
-      WEBHOOK_TIMEOUT: 30000
-    volumes:
-      - umg-unoapi-data:/home/unoapi/data
-    networks:
-      - transports
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9876/ping >/dev/null"]
-      interval: 15s
-      timeout: 5s
-      retries: 10
-      start_period: 60s
+    profiles: ["parked"]
 
   signal-cli:
     build: !reset null
@@ -86,22 +86,40 @@ services:
     container_name: umg-signal-cli
     environment:
       # signal-cli-rest-api runs in MODE=normal by default; json-rpc is
-      # lower-latency for high-throughput send. We keep json-rpc to match
-      # the dev-stub contract used by the worker (TZ §24).
+      # lower-latency for high-throughput send, and `startLink`/`finishLink`
+      # (the linked-device handshake the wizard drives) are json-rpc calls.
       MODE: json-rpc
-      AUTO_RECEIVE_SCHEDULE: "0 */1 * * * *"
-      # Persistence: keys live under /home/signal/.local/share/signal-cli
-      SIGNAL_DATA_PATH: /home/signal/data
-      # Use the sidecar's bundled Java; no extra JDK env needed.
-      JAVA_TOOL_OPTIONS: "-Xmx512m"
-    volumes:
-      - umg-signal-data:/home/signal/data
+      # The sidecar logs `finishLink` failures — the step that completes a QR
+      # pairing — at debug level only. Without this a half-linked account looks
+      # identical to "the admin never scanned".
+      LOG_LEVEL: ${SIGNAL_LOG_LEVEL:-debug}
+    # `!override` replaces the base file's stub mount. Without it Compose
+    # appends, leaving the same volume mounted at two different paths.
+    volumes: !override
+      # The image hardcodes SIGNAL_CLI_CONFIG_DIR=/home/.local/share/signal-cli.
+      # Linked-device keys live here — mount the volume exactly there or every
+      # restart forces re-pairing of every number (TZ §24).
+      - umg-signal-data:/home/.local/share/signal-cli
     networks:
       - transports
+      # Signal and WhatsApp sidecars must reach their providers' servers:
+      # signal-cli's `startLink` fails with "Link request error: Connection
+      # closed!" without egress, and whatsmeow cannot open its socket. The
+      # `transports` network stays internal so the GoIP vendor container
+      # keeps its no-egress guarantee (ADR-002).
+      - transports-egress
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/v1/health >/dev/null"]
+      # The image ships curl but not wget, and /v1/health answers 204.
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/v1/health >/dev/null"]
       interval: 15s
       timeout: 5s
       retries: 10
       start_period: 60s
+
+networks:
+  # Outbound-capable network for the sidecars that talk to Signal /
+  # WhatsApp. Deliberately separate from `transports` so adding it is an
+  # explicit, per-service decision rather than a blanket opening.
+  transports-egress:
+    internal: false
