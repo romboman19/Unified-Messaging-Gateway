@@ -57,7 +57,12 @@ if [ "${TABLES:-0}" = "0" ]; then
   # The dump creates the database and grants, which the application user is not
   # allowed to do — it has to go in as root.
   echo "[sms-server] empty database — importing goipinit.sql as root"
-  mysql -h "$DB_HOST" -u root -p"$ROOT_PASS" < /usr/local/goip/inc/goipinit.sql
+  # NOTE: the archive ships two dumps with the same name. `inc/goipinit.sql`
+  # is an older 15-table schema; the installer uses the 20-table one at the
+  # package root, and only that one has the columns the PHP actually reads
+  # (login fails with "Bad query: (SELECT session_time from system)" on the
+  # other). Keep this path.
+  mysql -h "$DB_HOST" -u root -p"$ROOT_PASS" < /usr/local/goip/goipinit.sql
 
   # The dump also grants only to goip@localhost with a hardcoded password,
   # which is useless when the database lives in its own container. Re-grant to
