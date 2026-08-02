@@ -9,6 +9,7 @@ import RedisStore from 'connect-redis';
 import { createClient } from 'redis';
 import { AppModule } from './app.module';
 import { LoggerService } from './common/logger.service';
+import { OpenApiService } from './openapi/openapi.service';
 
 async function bootstrap() {
   const logger = new LoggerService();
@@ -53,14 +54,21 @@ async function bootstrap() {
     }),
   );
 
+  // The document is built in every environment — production included, where
+  // it is what the admin UI's API tab renders. Previously this whole block was
+  // skipped in production, so the deployed system had no API reference at all.
+  const swaggerConfig = new DocumentBuilder()
+    .setTitle('Unified Messaging Gateway API')
+    .setDescription('Єдиний REST API для SMS, WhatsApp та Signal')
+    .setVersion('1.0')
+    .addBearerAuth()
+    .build();
+  const document = SwaggerModule.createDocument(app, swaggerConfig);
+  // Served to the UI by OpenApiController, behind the admin session.
+  app.get(OpenApiService).set(document);
   if (config.get('NODE_ENV') !== 'production') {
-    const swaggerConfig = new DocumentBuilder()
-      .setTitle('Unified Messaging Gateway API')
-      .setDescription('Єдиний REST API для SMS, WhatsApp та Signal')
-      .setVersion('1.0')
-      .addBearerAuth()
-      .build();
-    const document = SwaggerModule.createDocument(app, swaggerConfig);
+    // Interactive Swagger UI stays a development convenience: it mounts
+    // outside the guard chain, so we do not expose it on deployed systems.
     SwaggerModule.setup('api/docs', app, document);
   }
 

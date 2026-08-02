@@ -5,6 +5,7 @@ import { api } from '../hooks/useAuth';
 import { ApiToken } from '../lib/types';
 import { Badge, ConfirmDialog, Modal } from '../components/ui';
 import { apiError, formatDate } from '../lib/format';
+import { ApiReference } from '../components/ApiReference';
 
 export default function ApiTokensPage() {
   const queryClient = useQueryClient();
@@ -188,6 +189,10 @@ export default function ApiTokensPage() {
           </div>
         </Modal>
       )}
+
+      <div className="mt-8">
+        <ApiReference />
+      </div>
 
       {revoking && (
         <ConfirmDialog

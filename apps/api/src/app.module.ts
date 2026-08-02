@@ -18,6 +18,7 @@ import { AlertsModule } from './alerts/alerts.module';
 import { AuditLogsModule } from './audit-logs/audit-logs.module';
 import { ConversationsModule } from './conversations/conversations.module';
 import { InboundWebhooksModule } from './webhooks/inbound-webhooks.module';
+import { OpenApiModule } from './openapi/openapi.module';
 import { RequestIdMiddleware } from './common/request-id.middleware';
 
 @Module({
@@ -54,6 +55,7 @@ import { RequestIdMiddleware } from './common/request-id.middleware';
     AuditLogsModule,
     ConversationsModule,
     InboundWebhooksModule,
+    OpenApiModule,
   ],
 })
 export class AppModule implements NestModule {
