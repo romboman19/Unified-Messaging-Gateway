@@ -1,0 +1,390 @@
+# Single-file stack for Portainer (and anything else that deploys one compose
+# file).
+#
+# GENERATED — do not edit. Regenerate after changing either source file:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+#     config --no-interpolate > docker-compose.portainer.yml
+#   # then make the build contexts relative again
+#
+# Why this exists: the stack is normally two files, because the base defines
+# dev stubs and the prod override swaps in the real vendor images using the
+# `!reset` / `!override` merge tags. Those tags only mean something *while*
+# merging, and Portainer deploys a single file — so the merge is done here
+# ahead of time.
+#
+# Secrets are NOT baked in: `--no-interpolate` keeps every ${VAR} placeholder,
+# so values come from Portainer's environment variables, exactly as they would
+# from .env. Fill in the same set listed in .env.example.
+
+name: umg
+networks:
+  backend:
+    internal: true
+    name: umg_backend
+  frontend:
+    internal: false
+    name: umg_frontend
+  transports:
+    internal: true
+    name: umg_transports
+  transports-egress:
+    internal: false
+    name: umg_transports-egress
+services:
+  dbsms-db:
+    container_name: umg-dbsms-db
+    environment:
+      MARIADB_DATABASE: ${SMS_DB_NAME:-goip}
+      MARIADB_PASSWORD: ${SMS_DB_PASSWORD:?set in .env}
+      MARIADB_ROOT_PASSWORD: ${SMS_DB_ROOT_PASSWORD:?set in .env}
+      MARIADB_USER: ${SMS_DB_USER:-goip}
+    healthcheck:
+      interval: 10s
+      retries: 10
+      test:
+        - CMD-SHELL
+        - mariadb-admin ping -h 127.0.0.1 -u root -p$$MARIADB_ROOT_PASSWORD --silent
+      timeout: 5s
+    image: mariadb:10.11
+    networks:
+      transports: null
+    restart: unless-stopped
+    volumes:
+      - source: umg-dbsms-db-data
+        target: /var/lib/mysql
+        type: volume
+        volume: {}
+  dbsms-server:
+    build:
+      context: ./infra/docker
+      dockerfile: Dockerfile.dbltek-sms
+    container_name: umg-dbsms-server
+    depends_on:
+      dbsms-db:
+        condition: service_healthy
+        required: true
+    environment:
+      SMS_DB_HOST: dbsms-db
+      SMS_DB_NAME: ${SMS_DB_NAME:-goip}
+      SMS_DB_PASSWORD: ${SMS_DB_PASSWORD:?set in .env}
+      SMS_DB_ROOT_PASSWORD: ${SMS_DB_ROOT_PASSWORD:?set in .env}
+      SMS_DB_USER: ${SMS_DB_USER:-goip}
+      SMS_FORWARD_URL: ${SMS_FORWARD_URL:-}
+      SMS_GOIPCRON_PORT: "44444"
+      TZ: Europe/Kyiv
+    healthcheck:
+      interval: 15s
+      retries: 10
+      start_period: 60s
+      test:
+        - CMD-SHELL
+        - curl -fsS http://127.0.0.1/goip/ >/dev/null
+      timeout: 5s
+    image: umg-dbltek-sms:local
+    networks:
+      frontend: null
+      transports: null
+    ports:
+      - ${SMS_WEB_PORT:-8084}:80
+      - 44444:44444/udp
+    restart: unless-stopped
+  dbsms-vendor:
+    container_name: umg-dbsms-vendor
+    environment:
+      STUB_PORT: "8080"
+      STUB_VENDOR: dbsms
+    healthcheck:
+      interval: 15s
+      retries: 5
+      test:
+        - CMD-SHELL
+        - wget -qO- http://127.0.0.1:8080/health >/dev/null
+      timeout: 5s
+    networks:
+      transports: null
+    profiles:
+      - parked
+    restart: unless-stopped
+  gwmd:
+    command:
+      - rest
+      - --base-path=/app
+      - --port=3000
+      - --ui-enabled=false
+      - --ui-auto-update=false
+      - --webhook=http://umg-api:4000/api/v1/webhooks/gwmd
+      - --webhook-secret=${GWMD_WEBHOOK_SECRET:?set in .env}
+      - --basic-auth=${GWMD_USERNAME:-umg}:${GWMD_PASSWORD:?set in .env}
+    container_name: umg-gwmd
+    environment:
+      - STUB_PORT=3000
+      - STUB_VENDOR=gwmd
+      - TZ=Europe/Kyiv
+    healthcheck:
+      interval: 15s
+      retries: 10
+      start_period: 60s
+      test:
+        - CMD-SHELL
+        - wget -qO- http://127.0.0.1:3000/health >/dev/null
+      timeout: 5s
+    image: aldinokemal2104/go-whatsapp-web-multidevice:latest
+    networks:
+      transports: null
+      transports-egress: null
+    restart: unless-stopped
+    volumes:
+      - source: umg-gwmd-data
+        target: /app/storages
+        type: volume
+        volume: {}
+  postgres:
+    container_name: umg-postgres
+    environment:
+      POSTGRES_DB: umg
+      POSTGRES_PASSWORD: umg
+      POSTGRES_USER: umg
+    healthcheck:
+      interval: 10s
+      retries: 5
+      test:
+        - CMD-SHELL
+        - pg_isready -U umg -d umg
+      timeout: 5s
+    image: postgres:17-alpine
+    networks:
+      backend: null
+    restart: unless-stopped
+    volumes:
+      - source: umg-postgres-data
+        target: /var/lib/postgresql/data
+        type: volume
+        volume: {}
+  redis:
+    command: redis-server --appendonly yes
+    container_name: umg-redis
+    healthcheck:
+      interval: 10s
+      retries: 5
+      test:
+        - CMD
+        - redis-cli
+        - ping
+      timeout: 3s
+    image: redis:8-alpine
+    networks:
+      backend: null
+    restart: unless-stopped
+    volumes:
+      - source: umg-redis-data
+        target: /data
+        type: volume
+        volume: {}
+  reverse-proxy:
+    container_name: umg-reverse-proxy
+    depends_on:
+      umg-api:
+        condition: service_started
+        required: true
+      umg-web:
+        condition: service_started
+        required: true
+    image: nginx:1.27-alpine
+    networks:
+      frontend: null
+    ports:
+      - mode: ingress
+        protocol: tcp
+        published: "8083"
+        target: 8083
+    restart: unless-stopped
+    volumes:
+      - bind:
+          create_host_path: true
+        read_only: true
+        source: /srv/umg/infra/docker/nginx-reverse-proxy.conf
+        target: /etc/nginx/conf.d/default.conf
+        type: bind
+  signal-cli:
+    container_name: umg-signal-cli
+    environment:
+      - SIGNAL_CLI_MODE=${SIGNAL_CLI_MODE:-json-rpc}
+      - STUB_PORT=8080
+      - STUB_VENDOR=signal
+      - LOG_LEVEL=${SIGNAL_LOG_LEVEL:-debug}
+      - MODE=json-rpc
+    healthcheck:
+      interval: 15s
+      retries: 10
+      start_period: 60s
+      test:
+        - CMD-SHELL
+        - curl -fsS http://127.0.0.1:8080/v1/health >/dev/null
+      timeout: 5s
+    image: bbernhard/signal-cli-rest-api:0.100
+    networks:
+      transports: null
+      transports-egress: null
+    restart: unless-stopped
+    volumes:
+      - source: umg-signal-data
+        target: /home/.local/share/signal-cli
+        type: volume
+        volume: {}
+  umg-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: api
+    container_name: umg-api
+    depends_on:
+      postgres:
+        condition: service_started
+        required: true
+      redis:
+        condition: service_started
+        required: true
+    environment:
+      ADMIN_BOOTSTRAP_PASSWORD: ${ADMIN_BOOTSTRAP_PASSWORD}
+      COOKIE_SECRET: ${COOKIE_SECRET}
+      DATABASE_URL: postgresql://umg:umg@postgres:5432/umg?schema=public
+      DBSMS_BASE_URL: ${DBSMS_BASE_URL:-http://dbsms-server}
+      DBSMS_PASSWORD: ${DBSMS_PASSWORD:-change-me}
+      DBSMS_USERNAME: ${DBSMS_USERNAME:-admin}
+      DBSMS_WEBHOOK_SECRET: ${DBSMS_WEBHOOK_SECRET:-}
+      GWMD_BASE_URL: ${GWMD_BASE_URL:-http://gwmd:3000}
+      GWMD_PASSWORD: ${GWMD_PASSWORD:-change-me}
+      GWMD_USERNAME: ${GWMD_USERNAME:-umg}
+      GWMD_WEBHOOK_SECRET: ${GWMD_WEBHOOK_SECRET:-}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      MEDIA_STORAGE_PATH: /data/media
+      NODE_ENV: production
+      PORT: 4000
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_URL: redis://redis:6379
+      SESSION_SECRET: ${SESSION_SECRET}
+      SIGNAL_BASE_URL: ${SIGNAL_BASE_URL:-http://signal-cli:8080}
+      UNOAPI_API_KEY: ${UNOAPI_API_KEY:-}
+      UNOAPI_BASE_URL: ${UNOAPI_BASE_URL:-}
+    healthcheck:
+      interval: 15s
+      retries: 3
+      test:
+        - CMD
+        - wget
+        - --spider
+        - -q
+        - http://127.0.0.1:4000/api/v1/health/live
+      timeout: 5s
+    networks:
+      backend: null
+      frontend: null
+      transports: null
+    restart: unless-stopped
+    volumes:
+      - source: umg-media-data
+        target: /data/media
+        type: volume
+        volume: {}
+  umg-web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: web
+    container_name: umg-web
+    healthcheck:
+      interval: 15s
+      retries: 3
+      test:
+        - CMD
+        - wget
+        - --spider
+        - -q
+        - http://127.0.0.1:80/
+      timeout: 5s
+    networks:
+      frontend: null
+    restart: unless-stopped
+  umg-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: worker
+    container_name: umg-worker
+    depends_on:
+      postgres:
+        condition: service_started
+        required: true
+      redis:
+        condition: service_started
+        required: true
+    environment:
+      DATABASE_URL: postgresql://umg:umg@postgres:5432/umg?schema=public
+      DBSMS_BASE_URL: ${DBSMS_BASE_URL:-http://dbsms-server}
+      DBSMS_PASSWORD: ${DBSMS_PASSWORD:-change-me}
+      DBSMS_USERNAME: ${DBSMS_USERNAME:-admin}
+      DBSMS_WEBHOOK_SECRET: ${DBSMS_WEBHOOK_SECRET:-}
+      GWMD_BASE_URL: ${GWMD_BASE_URL:-http://gwmd:3000}
+      GWMD_PASSWORD: ${GWMD_PASSWORD:-change-me}
+      GWMD_USERNAME: ${GWMD_USERNAME:-umg}
+      GWMD_WEBHOOK_SECRET: ${GWMD_WEBHOOK_SECRET:-}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      MEDIA_STORAGE_PATH: /data/media
+      NODE_ENV: production
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_URL: redis://redis:6379
+      SIGNAL_BASE_URL: ${SIGNAL_BASE_URL:-http://signal-cli:8080}
+      UNOAPI_API_KEY: ${UNOAPI_API_KEY:-}
+      UNOAPI_BASE_URL: ${UNOAPI_BASE_URL:-}
+    networks:
+      backend: null
+      transports: null
+    restart: unless-stopped
+    volumes:
+      - source: umg-media-data
+        target: /data/media
+        type: volume
+        volume: {}
+  unoapi:
+    build:
+      context: ./infra/docker
+      dockerfile: Dockerfile.sidecar-stub
+    container_name: umg-unoapi
+    environment:
+      STUB_PORT: "9876"
+      STUB_VENDOR: unoapi
+    healthcheck:
+      interval: 15s
+      retries: 5
+      test:
+        - CMD-SHELL
+        - wget -qO- http://127.0.0.1:9876/ping >/dev/null
+      timeout: 5s
+    networks:
+      transports: null
+    profiles:
+      - parked
+    restart: unless-stopped
+    volumes:
+      - source: umg-unoapi-data
+        target: /home/unoapi/data
+        type: volume
+        volume: {}
+volumes:
+  umg-dbsms-db-data:
+    name: umg_umg-dbsms-db-data
+  umg-gwmd-data:
+    name: umg_umg-gwmd-data
+  umg-media-data:
+    name: umg_umg-media-data
+  umg-postgres-data:
+    name: umg_umg-postgres-data
+  umg-redis-data:
+    name: umg_umg-redis-data
+  umg-signal-data:
+    name: umg_umg-signal-data
+  umg-unoapi-data:
+    name: umg_umg-unoapi-data
