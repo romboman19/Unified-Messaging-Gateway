@@ -119,6 +119,24 @@ export class ProvisioningService {
       );
     }
 
+    // Snapshot what the sidecar already knows before we mint the QR.
+    // Signal's `/v1/accounts` returns bare phone numbers with no device name
+    // or uuid to match on, so the only way to tell which account the scan
+    // produced is to diff against this baseline.
+    let knownBefore: string[] = [];
+    if (adapter.listProvisionedAccounts) {
+      try {
+        const before = await adapter.listProvisionedAccounts(this.accountConfig(account));
+        knownBefore = before.map((a) => a.externalId).filter(Boolean);
+      } catch (err) {
+        // A sidecar that can't list yet shouldn't block pairing; we just
+        // lose the diff strategy and fall back to identity matching.
+        this.logger.warn(
+          `Could not snapshot accounts for ${account.adapter}: ${(err as Error).message}`,
+        );
+      }
+    }
+
     // 1. Create the endpoint row up-front so the wizard can poll against
     //    a stable id even if the user closes the tab mid-flow.
     const endpoint = await this.prisma.endpoint.create({
@@ -148,6 +166,10 @@ export class ProvisioningService {
             qrSessionId: result.sessionId,
             qrExpiresAt: new Date(Date.now() + result.ttlSeconds * 1000).toISOString(),
             kind: dto.kind,
+            knownAccountsBefore: knownBefore,
+            // Sidecar-internal URL, never sent to the browser — the qr.png
+            // route below fetches it server-side.
+            qrImageUrl: result.imageUrl ?? null,
           } as never,
         },
       });
@@ -161,7 +183,13 @@ export class ProvisioningService {
       );
       return {
         endpointId: endpoint.id,
-        uri: result.uri,
+        // Exactly one of these is set: `uri` for sidecars that hand back an
+        // encodable link (Signal), `qrImageUrl` for sidecars that render the
+        // QR themselves (gwmd) and need the API to proxy the bytes.
+        uri: result.imageUrl ? null : result.uri,
+        qrImageUrl: result.imageUrl
+          ? `/transport-accounts/${accountId}/provision/${endpoint.id}/qr.png`
+          : null,
         ttlSeconds: result.ttlSeconds,
       };
     } catch (err) {
@@ -192,18 +220,62 @@ export class ProvisioningService {
       throw new NotImplementedException('Адаптер не вміє перераховувати акаунти.');
     }
 
-    const claimed = await adapter.listProvisionedAccounts(this.accountConfig(account));
+    const claimed = (await adapter.listProvisionedAccounts(
+      this.accountConfig(account),
+    )) as ProvisionedAccount[];
+    const cfg = (endpoint.configJson as Record<string, unknown>) ?? {};
 
-    // 3 reconciliation strategies, in order of preference:
+    // 4 reconciliation strategies, in order of preference:
     //   1. endpoint.uuid matches a sidecar account → link that.
     //   2. endpoint.phoneE164 matches a sidecar account → link that.
     //   3. endpoint.deviceName matches a sidecar account → link that.
-    const match = (claimed as ProvisionedAccount[]).find((a) => {
+    //   4. exactly one account appeared since the wizard started → that's it.
+    // Strategy 4 carries Signal: its account list is bare phone numbers, so
+    // there is nothing on it that identifies our device by name.
+    let match = claimed.find((a) => {
       if (endpoint.uuid && a.uuid && a.uuid === endpoint.uuid) return true;
       if (endpoint.phoneE164 && a.phoneE164 && a.phoneE164 === endpoint.phoneE164) return true;
       if (endpoint.deviceName && a.deviceName && a.deviceName === endpoint.deviceName) return true;
       return false;
     });
+
+    if (!match && Array.isArray(cfg['knownAccountsBefore'])) {
+      const before = new Set((cfg['knownAccountsBefore'] as unknown[]).map(String));
+      const fresh = claimed.filter((a) => a.externalId && !before.has(a.externalId));
+      // Only act on an unambiguous diff. Two concurrent wizards against the
+      // same sidecar would otherwise link each other's numbers.
+      if (fresh.length === 1) {
+        match = fresh[0];
+      } else if (fresh.length > 1) {
+        this.logger.warn(
+          `Endpoint ${endpoint.id}: ${fresh.length} new sidecar accounts since QR was minted; ` +
+            'cannot attribute one to this wizard. Use reattach to pick manually.',
+        );
+      }
+    }
+
+    // Last resort: adopt an account the sidecar already had but that no
+    // endpoint claims. signal-cli does not always surface a freshly linked
+    // account in `/v1/accounts` straight away, so a scan can complete while
+    // the wizard is still polling and only appear in a later snapshot — by
+    // which point it is no longer "new" relative to the baseline. Restricting
+    // this to genuinely unclaimed accounts means we can never steal a number
+    // that belongs to another endpoint.
+    if (!match && claimed.length > 0) {
+      const claimedIds = claimed.map((a) => a.externalId).filter(Boolean) as string[];
+      const taken = await this.prisma.endpoint.findMany({
+        where: { accountId, externalId: { in: claimedIds }, NOT: { id: endpoint.id } },
+        select: { externalId: true },
+      });
+      const takenSet = new Set(taken.map((t) => t.externalId));
+      const orphans = claimed.filter((a) => a.externalId && !takenSet.has(a.externalId));
+      if (orphans.length === 1) {
+        this.logger.log(
+          `Endpoint ${endpoint.id}: adopting unclaimed sidecar account ${orphans[0].externalId}`,
+        );
+        match = orphans[0];
+      }
+    }
 
     if (match) {
       const updated = await this.prisma.endpoint.update({
@@ -230,7 +302,6 @@ export class ProvisioningService {
     }
 
     // No match: if the QR has expired, mark failed.
-    const cfg = (endpoint.configJson as Record<string, unknown>) ?? {};
     const expiresAt = cfg['qrExpiresAt'] ? new Date(String(cfg['qrExpiresAt'])) : null;
     if (expiresAt && expiresAt.getTime() < Date.now()) {
       const updated = await this.prisma.endpoint.update({
@@ -241,6 +312,34 @@ export class ProvisioningService {
     }
 
     return { state: endpoint.registrationState, endpoint };
+  }
+
+  /**
+   * Stream back the QR image a sidecar rendered for this endpoint.
+   *
+   * The sidecar lives on the `internal: true` transports network, so its own
+   * image URL is unreachable from the admin's browser. The API is the only
+   * process that can see both sides.
+   */
+  async qrImage(accountId: string, endpointId: string) {
+    const endpoint = await this.getEndpoint(endpointId);
+    if (endpoint.accountId !== accountId) {
+      throw new NotFoundException('Endpoint не належить цьому каналу.');
+    }
+    const cfg = (endpoint.configJson as Record<string, unknown>) ?? {};
+    const imageUrl = cfg['qrImageUrl'] ? String(cfg['qrImageUrl']) : '';
+    if (!imageUrl) {
+      throw new NotFoundException('Для цього endpoint немає QR-зображення.');
+    }
+    const { account, adapter } = await this.getAdapter(accountId);
+    if (!adapter.fetchProvisioningImage) {
+      throw new NotImplementedException('Адаптер не віддає QR-зображення.');
+    }
+    try {
+      return await adapter.fetchProvisioningImage(this.accountConfig(account), imageUrl);
+    } catch (err) {
+      this.mapError(err);
+    }
   }
 
   /** List what the sidecar currently has — wizard reconciliation. */

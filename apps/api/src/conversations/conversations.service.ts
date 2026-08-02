@@ -61,18 +61,41 @@ export class ConversationsService {
         orderBy: { createdAt: 'asc' },
         include: {
           _count: { select: { attempts: true, statusHistory: true } },
+          // The last attempt carries why a send failed. Without it the UI can
+          // only say "не вдалося" and the admin has no way to tell an
+          // unregistered recipient from a transport outage.
+          attempts: {
+            orderBy: { startedAt: 'desc' },
+            take: 1,
+            select: { result: true, errorJson: true },
+          },
         },
       }),
       this.prisma.message.count({ where: { conversationId: id } }),
     ]);
     return {
-      items: items.map((m) => ({
+      items: items.map(({ attempts, ...m }) => ({
         ...m,
         attemptsCount: m._count.attempts,
         statusHistoryCount: m._count.statusHistory,
+        lastError: this.errorSummary(attempts[0]?.errorJson),
       })),
       count,
     };
+  }
+
+  /**
+   * Flattens an attempt's stored error into `{ code, message }` for the UI.
+   * Adapters already speak in canonical codes, so the web layer can turn a
+   * code into human wording without parsing vendor payloads.
+   */
+  private errorSummary(errorJson: unknown): { code: string; message: string } | null {
+    if (!errorJson || typeof errorJson !== 'object') return null;
+    const e = errorJson as Record<string, unknown>;
+    const code = typeof e['code'] === 'string' ? e['code'] : '';
+    const message = typeof e['message'] === 'string' ? e['message'] : '';
+    if (!code && !message) return null;
+    return { code, message };
   }
 
   private preview(content: unknown): string {

@@ -33,13 +33,23 @@ export class MessagesService {
     let accountId = dto.accountId;
     let endpointId = dto.endpointId;
     if (!accountId || !endpointId) {
+      // Pick by channel type, never by a hardcoded adapter list: that list
+      // silently omitted `gwmd` and, worse, matched accounts of any channel —
+      // choosing "signal" in the UI could dispatch through the SMS account.
       const account = await this.prisma.transportAccount.findFirst({
-        where: { adapter: dto.channel === 'mock' ? 'mock' : { in: ['mock', 'goip-vendor', 'unoapi', 'signal-cli-rest-api'] } },
-        include: { endpoints: { where: { enabled: true } } },
+        where: {
+          type: dto.channel,
+          status: 'active',
+          endpoints: { some: { enabled: true } },
+        },
+        include: { endpoints: { where: { enabled: true }, orderBy: { createdAt: 'asc' } } },
         orderBy: { createdAt: 'desc' },
       });
       if (!account || account.endpoints.length === 0) {
-        throw new UnprocessableEntityException('Доступний endpoint відсутній для каналу ' + dto.channel);
+        throw new UnprocessableEntityException(
+          `Немає активного привʼязаного номера для каналу ${dto.channel}. ` +
+            'Привʼяжіть номер на сторінці «Канали».',
+        );
       }
       accountId = account.id;
       endpointId = account.endpoints[0].id;
@@ -92,6 +102,16 @@ export class MessagesService {
 
     const contentWithAttachments = { ...dto.content, attachments: attachmentIds };
 
+    // Thread the outbound message onto a conversation with the recipient, the
+    // same way inbound ingestion does. Without this every sent message has a
+    // null conversationId, so the Test-chat conversation list stays empty and
+    // the admin never sees the message or its delivery status.
+    const conversation = await this.findOrCreateConversation(
+      dto.endpointId!,
+      dto.channel,
+      dto.to,
+    );
+
     const message = await this.prisma.$transaction(async (tx) => {
       const created = await tx.message.create({
         data: {
@@ -99,6 +119,7 @@ export class MessagesService {
           channelType: dto.channel,
           accountId: dto.accountId,
           endpointId: dto.endpointId,
+          conversationId: conversation.id,
           externalId: null,
           messageType: dto.type,
           status: dto.scheduledAt ? MessageStatus.scheduled : MessageStatus.queued,
@@ -112,6 +133,10 @@ export class MessagesService {
       });
       await tx.messageStatusHistory.create({
         data: { messageId: created.id, status: created.status, source: 'api', payload: { requestId } },
+      });
+      await tx.conversation.update({
+        where: { id: conversation.id },
+        data: { lastMessageAt: new Date() },
       });
       if (attachmentIds.length > 0) {
         await tx.attachment.updateMany({
@@ -249,6 +274,29 @@ export class MessagesService {
     }
     await this.audit.log(actorId, 'message.cancelled', 'message', id, { status: message.status }, { status: updated.status });
     return updated;
+  }
+
+  /**
+   * Conversations are keyed by (endpoint, peer). The peer for an outbound
+   * message is the recipient; for inbound it is the sender — both sides land
+   * on the same row so a reply continues the thread rather than starting a
+   * new one.
+   */
+  private async findOrCreateConversation(endpointId: string, channel: ChannelType, to: string) {
+    const peer = to.startsWith('+') ? to : `+${to.replace(/\D/g, '')}`;
+    const existing = await this.prisma.conversation.findFirst({
+      where: { endpointId, peerPhoneE164: peer },
+    });
+    if (existing) return existing;
+    return this.prisma.conversation.create({
+      data: {
+        channelType: channel,
+        endpointId,
+        peerId: to,
+        peerPhoneE164: peer,
+        lastMessageAt: new Date(),
+      },
+    });
   }
 
   private hashRequest(dto: SendMessageDto): string {
