@@ -361,11 +361,10 @@ export class GoipVendorAdapter {
   }
 
   /**
-   * Reads a prepaid balance by USSD and pulls the amount out of the reply.
+   * Reads a balance by USSD and pulls the amount out of the reply.
    *
-   * Carriers answer in free-form text, so the amount is extracted heuristically
-   * and the raw reply is always returned alongside — an operator can read
-   * "Na rahunku 106.0 grn." even when no parser recognises it.
+   * Carriers answer in free-form text and the raw reply is always returned, so
+   * an operator can read it even when parsing fails.
    */
   async checkBalance(
     account: AccountConfig,
@@ -374,16 +373,7 @@ export class GoipVendorAdapter {
   ): Promise<{ ok: boolean; amount: number | null; currency: string | null; reply: string }> {
     const { ok, reply } = await this.sendUssd(account, line, ussdCode);
     if (!ok) return { ok: false, amount: null, currency: null, reply };
-
-    // First number with an optional decimal part, plus a currency word if the
-    // carrier put one next to it.
-    const m = /(-?\d+(?:[.,]\d{1,2})?)\s*(grn|грн|uah|₴|usd|eur)?/i.exec(reply);
-    return {
-      ok: true,
-      amount: m ? Number(m[1].replace(',', '.')) : null,
-      currency: m?.[2] ? m[2].toLowerCase() : null,
-      reply,
-    };
+    return { ok: true, ...parseBalance(reply), reply };
   }
 
   /** `querysms` — pull the current state of a previously accepted send. */
@@ -456,4 +446,53 @@ const CMS_ERRORS: Record<string, string> = {
 
 function cmsErrorText(code: string): string {
   return CMS_ERRORS[code] ?? `Помилка GSM, код CMS ${code}`;
+}
+
+/**
+ * Extracts an amount and currency from a carrier's balance reply.
+ *
+ * Contract SIMs are the trap here. Vodafone reports a debt as
+ *
+ *   "Na osobovomu rakhunku 295423639697: zaborhovanist 48.17 hrn."
+ *
+ * and credit as
+ *
+ *   "Na osobovomu rakhunku 295423639697: avans 101.83 hrn."
+ *
+ * Both are positive numbers: the sign lives in the *word*, never in a minus.
+ * Reading the first number at face value reports a 48-hryvnia debt as if the
+ * SIM had 48 hryvnia available — precisely inverted, and precisely when it
+ * matters. So the wording decides the sign.
+ *
+ * The account number in that reply is also a long digit run that must not be
+ * mistaken for the amount, which is why matching requires a decimal part or an
+ * adjacent currency word.
+ */
+export function parseBalance(reply: string): { amount: number | null; currency: string | null } {
+  const text = reply.toLowerCase();
+
+  // Debt wording, transliterated and Cyrillic, across the local carriers.
+  const isDebt = /(zaborhovanist|zaborgovanist|заборгован|borh|борг|do splaty|до сплати)/i.test(
+    text,
+  );
+
+  // A decimal amount, or an integer immediately followed by a currency word.
+  // Requiring one or the other keeps account and phone numbers out.
+  const withDecimals = /(\d+[.,]\d{1,2})\s*(grn|hrn|грн|uah|₴)?/i.exec(text);
+  const withCurrency = /(\d+)\s*(grn|hrn|грн|uah|₴)/i.exec(text);
+  const m = withDecimals ?? withCurrency;
+  if (!m) return { amount: null, currency: null };
+
+  const magnitude = Number(m[1].replace(',', '.'));
+  if (Number.isNaN(magnitude)) return { amount: null, currency: null };
+
+  return {
+    amount: isDebt ? -Math.abs(magnitude) : magnitude,
+    currency: m[2] ? normaliseCurrency(m[2]) : 'uah',
+  };
+}
+
+function normaliseCurrency(raw: string): string {
+  const c = raw.toLowerCase();
+  return c === 'grn' || c === 'hrn' || c === 'грн' || c === '₴' ? 'uah' : c;
 }
