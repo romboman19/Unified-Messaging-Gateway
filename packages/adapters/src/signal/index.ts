@@ -225,10 +225,14 @@ export class SignalCliRestApiAdapter {
     recipients: string[],
   ): Promise<string[]> {
     try {
-      const query = recipients.map((r) => encodeURIComponent(r)).join(',');
+      // The endpoint reads `numbers` as a repeated query parameter; a
+      // comma-joined value is rejected with CdsiInvalidArgumentException.
+      const query = recipients
+        .map((r) => `numbers=${encodeURIComponent(r)}`)
+        .join('&');
       const url = `${this.baseUrl(account)}/v1/search/${encodeURIComponent(
         fromNumber,
-      )}?numbers=${query}`;
+      )}?${query}`;
       const res = await fetch(url, { method: 'GET' });
       if (!res.ok) return [];
       const body: any = await res.json().catch(() => []);
