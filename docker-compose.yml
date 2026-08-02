@@ -1,11 +1,12 @@
 services:
   reverse-proxy:
-    image: nginx:1.27-alpine
+    build:
+      context: ./infra/docker
+      dockerfile: Dockerfile.reverse-proxy
+    image: umg-reverse-proxy:local
     container_name: umg-reverse-proxy
     ports:
       - "8083:8083"
-    volumes:
-      - ./infra/docker/nginx-reverse-proxy.conf:/etc/nginx/conf.d/default.conf:ro
     networks:
       - frontend
     depends_on:

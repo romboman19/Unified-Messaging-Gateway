@@ -181,6 +181,9 @@ services:
         type: volume
         volume: {}
   reverse-proxy:
+    build:
+      context: ./infra/docker
+      dockerfile: Dockerfile.reverse-proxy
     container_name: umg-reverse-proxy
     depends_on:
       umg-api:
@@ -189,7 +192,7 @@ services:
       umg-web:
         condition: service_started
         required: true
-    image: nginx:1.27-alpine
+    image: umg-reverse-proxy:local
     networks:
       frontend: null
     ports:
@@ -198,13 +201,6 @@ services:
         published: "8083"
         target: 8083
     restart: unless-stopped
-    volumes:
-      - bind:
-          create_host_path: true
-        read_only: true
-        source: ./infra/docker/nginx-reverse-proxy.conf
-        target: /etc/nginx/conf.d/default.conf
-        type: bind
   signal-cli:
     container_name: umg-signal-cli
     environment:
