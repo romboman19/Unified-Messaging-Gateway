@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { ChannelType } from '@prisma/client';
 import { PrismaClient, TransportStatus } from '@umg/database';
 import { Inject } from '@nestjs/common';
@@ -153,11 +153,54 @@ export class TransportAccountsService {
     return endpoint;
   }
 
-  async deleteEndpoint(id: string, actorId: string | null) {
+  /**
+   * Remove a number from the channel.
+   *
+   * A bare `endpoint.delete()` fails with a foreign-key violation the moment
+   * the number has sent or received anything, which is what the admin sees as
+   * "delete does nothing". So: refuse by default when history exists, and
+   * require `force` to take the history down with it.
+   *
+   * Detaching the number from the vendor sidecar is the caller's job
+   * (`DELETE /endpoints/:id/registration`); deleting a still-linked endpoint
+   * would strand the pairing on the sidecar, so we block that too.
+   */
+  async deleteEndpoint(id: string, actorId: string | null, force = false) {
     const before = await this.prisma.endpoint.findUnique({ where: { id } });
     if (!before) throw new NotFoundException('Endpoint не знайдено.');
-    await this.prisma.endpoint.delete({ where: { id } });
-    await this.audit.log(actorId, 'endpoint.deleted', 'endpoint', id, before, {});
-    return { ok: true };
+
+    if (before.registrationState === 'linked') {
+      throw new ConflictException(
+        'Номер ще привʼязаний до транспорту. Спочатку відвʼяжіть його, потім видаляйте.',
+      );
+    }
+
+    const messageCount = await this.prisma.message.count({ where: { endpointId: id } });
+    if (messageCount > 0 && !force) {
+      throw new ConflictException(
+        `У номера є історія повідомлень (${messageCount}). ` +
+          'Видаліть разом з історією, якщо вона більше не потрібна.',
+      );
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      if (messageCount > 0) {
+        const messageIds = (
+          await tx.message.findMany({ where: { endpointId: id }, select: { id: true } })
+        ).map((m) => m.id);
+        // Children first — every one of these has a FK onto `messages`.
+        await tx.attachment.deleteMany({ where: { messageId: { in: messageIds } } });
+        await tx.messageAttempt.deleteMany({ where: { messageId: { in: messageIds } } });
+        await tx.messageStatusHistory.deleteMany({ where: { messageId: { in: messageIds } } });
+        await tx.message.deleteMany({ where: { endpointId: id } });
+      }
+      await tx.conversation.deleteMany({ where: { endpointId: id } });
+      await tx.endpoint.delete({ where: { id } });
+    });
+
+    await this.audit.log(actorId, 'endpoint.deleted', 'endpoint', id, before, {
+      deletedMessages: messageCount,
+    });
+    return { ok: true, deletedMessages: messageCount };
   }
 }

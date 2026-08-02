@@ -6,9 +6,12 @@ import {
   Delete,
   Body,
   Param,
+  Query,
   UseGuards,
   Request,
+  Res,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import { SessionGuard } from '../auth/session.guard';
 import { TransportAccountsService } from './transport-accounts.service';
 import {
@@ -114,6 +117,24 @@ export class TransportAccountsController {
     return this.provisioning.listSidecarAccounts(accountId);
   }
 
+  /**
+   * Proxy for sidecars that render the QR themselves (gwmd). The sidecar's
+   * own URL sits on the internal `transports` network, so the browser asks
+   * the API and the API fetches the bytes.
+   */
+  @Get(':id/provision/:endpointId/qr.png')
+  async qrImage(
+    @Param('id') accountId: string,
+    @Param('endpointId') endpointId: string,
+    @Res() res: Response,
+  ) {
+    const image = await this.provisioning.qrImage(accountId, endpointId);
+    res.setHeader('content-type', image.contentType);
+    // The QR is single-use and short-lived — never let a proxy hold it.
+    res.setHeader('cache-control', 'no-store');
+    res.end(Buffer.from(image.bytes));
+  }
+
   @Get(':id/provision/:endpointId/poll')
   pollProvisioning(
     @Param('id') accountId: string,
@@ -181,8 +202,12 @@ export class EndpointsController {
   }
 
   @Delete(':id')
-  delete(@Param('id') id: string, @Request() req: unknown) {
-    return this.service.deleteEndpoint(id, this.actor(req));
+  delete(
+    @Param('id') id: string,
+    @Query('force') force: string | undefined,
+    @Request() req: unknown,
+  ) {
+    return this.service.deleteEndpoint(id, this.actor(req), force === 'true');
   }
 
   @Delete(':id/registration')
