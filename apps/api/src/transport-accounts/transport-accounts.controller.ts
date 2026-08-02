@@ -12,6 +12,7 @@ import {
   Res,
 } from '@nestjs/common';
 import type { Response } from 'express';
+import { ApiBody, ApiOperation, ApiParam, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { SessionGuard } from '../auth/session.guard';
 import { TransportAccountsService } from './transport-accounts.service';
 import {
@@ -223,6 +224,44 @@ export class EndpointsController {
    * is not what the admin wants to see.
    */
   @Post(':id/balance')
+  @ApiTags('endpoints')
+  @ApiOperation({
+    summary: 'Перевірити баланс SIM (SMS/GoIP)',
+    description:
+      'Надсилає USSD-код на лінію та повертає розібраний баланс. Код за замовчуванням ' +
+      'береться з endpoint.configJson.balanceUssd (задається окремо для кожної SIM, бо код ' +
+      'залежить від оператора й тарифу); можна передати ussd в тілі, щоб перевірити разовим кодом ' +
+      'без зміни збереженого. Застосовується лише до каналу SMS — інші канали не мають балансу.',
+  })
+  @ApiParam({ name: 'id', description: 'ID endpoint (SIM-лінії)' })
+  @ApiBody({
+    required: false,
+    schema: {
+      type: 'object',
+      properties: {
+        ussd: {
+          type: 'string',
+          description:
+            'Разовий USSD-код (наприклад "*111#"), якщо не використовувати збережений на лінії',
+        },
+      },
+    },
+  })
+  @ApiResponse({
+    status: 201,
+    description: 'Баланс успішно отримано',
+    schema: {
+      type: 'object',
+      properties: {
+        amount: { type: 'number', nullable: true, example: 103 },
+        currency: { type: 'string', nullable: true, example: 'uah' },
+        reply: { type: 'string', example: 'Na rahunku 103.0 grn. ...' },
+        checkedAt: { type: 'string', format: 'date-time' },
+      },
+    },
+  })
+  @ApiResponse({ status: 400, description: 'USSD-код не задано ні в запиті, ні на лінії' })
+  @ApiResponse({ status: 502, description: 'Оператор не відповів або SMS Server недоступний' })
   checkBalance(@Param('id') id: string, @Body() body: { ussd?: string }) {
     return this.balance.check(id, body?.ussd);
   }
