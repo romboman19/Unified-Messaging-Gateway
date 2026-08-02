@@ -17,6 +17,7 @@ import { MediaModule } from './media/media.module';
 import { AlertsModule } from './alerts/alerts.module';
 import { AuditLogsModule } from './audit-logs/audit-logs.module';
 import { ConversationsModule } from './conversations/conversations.module';
+import { InboundWebhooksModule } from './webhooks/inbound-webhooks.module';
 import { RequestIdMiddleware } from './common/request-id.middleware';
 
 @Module({
@@ -52,6 +53,7 @@ import { RequestIdMiddleware } from './common/request-id.middleware';
     AlertsModule,
     AuditLogsModule,
     ConversationsModule,
+    InboundWebhooksModule,
   ],
 })
 export class AppModule implements NestModule {
