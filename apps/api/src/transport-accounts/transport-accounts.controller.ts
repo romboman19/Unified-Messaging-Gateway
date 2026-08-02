@@ -22,6 +22,7 @@ import {
 } from './transport-accounts.dto';
 import { ProvisioningService } from './provisioning.service';
 import { ProvisionQrDto, ProvisionVerifyDto, ReattachDto } from './provisioning.dto';
+import { BalanceService } from './balance.service';
 
 @Controller('transport-accounts')
 @UseGuards(SessionGuard)
@@ -175,6 +176,7 @@ export class EndpointsController {
   constructor(
     private readonly service: TransportAccountsService,
     private readonly provisioning: ProvisioningService,
+    private readonly balance: BalanceService,
   ) {}
 
   private actor(req: unknown): string | null {
@@ -213,5 +215,15 @@ export class EndpointsController {
   @Delete(':id/registration')
   unlinkRegistration(@Param('id') id: string, @Request() req: unknown) {
     return this.provisioning.unlink(id, this.actor(req));
+  }
+
+  /**
+   * Reads the SIM's balance now. The daily scheduler covers the routine case;
+   * this exists for the moment right after a top-up, when yesterday's figure
+   * is not what the admin wants to see.
+   */
+  @Post(':id/balance')
+  checkBalance(@Param('id') id: string, @Body() body: { ussd?: string }) {
+    return this.balance.check(id, body?.ussd);
   }
 }
