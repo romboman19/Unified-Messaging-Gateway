@@ -223,7 +223,9 @@ function RulesTab() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['routing-rules'] });
       setDeleting(null);
+      setFormError('');
     },
+    onError: (err) => setFormError(apiError(err, 'Не вдалося видалити правило.')),
   });
 
   const selectedAccount = accounts.data?.find((a) => a.id === editing?.accountId);
@@ -310,7 +312,10 @@ function RulesTab() {
                   <Pencil size={16} />
                 </button>
                 <button
-                  onClick={() => setDeleting(r)}
+                  onClick={() => {
+                    setDeleting(r);
+                    setFormError('');
+                  }}
                   className="rounded border p-2 text-red-600 hover:bg-red-50"
                   title="Видалити"
                 >
@@ -488,8 +493,12 @@ function RulesTab() {
       {deleting && (
         <ConfirmDialog
           text={`Видалити правило «${deleting.name}»? Цю дію не можна скасувати.`}
+          error={formError}
           busy={del.isPending}
-          onCancel={() => setDeleting(null)}
+          onCancel={() => {
+            setDeleting(null);
+            setFormError('');
+          }}
           onConfirm={() => del.mutate(deleting.id)}
         />
       )}
@@ -568,7 +577,9 @@ function DestinationsTab() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['destinations'] });
       setDeleting(null);
+      setFormError('');
     },
+    onError: (err) => setFormError(apiError(err, 'Не вдалося видалити призначення.')),
   });
 
   const test = useMutation({
@@ -644,7 +655,10 @@ function DestinationsTab() {
                     <Pencil size={16} />
                   </button>
                   <button
-                    onClick={() => setDeleting(d)}
+                    onClick={() => {
+                      setDeleting(d);
+                      setFormError('');
+                    }}
                     className="rounded border p-2 text-red-600 hover:bg-red-50"
                     title="Видалити"
                   >
@@ -845,8 +859,12 @@ function DestinationsTab() {
       {deleting && (
         <ConfirmDialog
           text={`Видалити призначення «${deleting.name}»? Правила, що на нього посилаються, втратять це призначення.`}
+          error={formError}
           busy={del.isPending}
-          onCancel={() => setDeleting(null)}
+          onCancel={() => {
+            setDeleting(null);
+            setFormError('');
+          }}
           onConfirm={() => del.mutate(deleting.id)}
         />
       )}

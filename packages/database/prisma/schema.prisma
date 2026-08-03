@@ -375,7 +375,7 @@ model WebhookDelivery {
   updatedAt        DateTime       @updatedAt @map("updated_at")
 
   event       MessageEvent       @relation(fields: [eventId], references: [id])
-  destination WebhookDestination @relation(fields: [destinationId], references: [id])
+  destination WebhookDestination @relation(fields: [destinationId], references: [id], onDelete: Cascade)
 
   @@index([status, nextAttemptAt])
   @@index([destinationId, createdAt])

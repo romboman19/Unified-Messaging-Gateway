@@ -40,11 +40,13 @@ export function Modal({
 
 export function ConfirmDialog({
   text,
+  error,
   onConfirm,
   onCancel,
   busy,
 }: {
   text: string;
+  error?: string | null;
   onConfirm: () => void;
   onCancel: () => void;
   busy?: boolean;
@@ -52,6 +54,7 @@ export function ConfirmDialog({
   return (
     <Modal title="Підтвердження" onClose={onCancel}>
       <p className="text-sm text-slate-600">{text}</p>
+      {error && <div className="mt-3 rounded bg-red-100 p-2 text-sm text-red-700">{error}</div>}
       <div className="mt-6 flex justify-end gap-2">
         <button onClick={onCancel} className="rounded border px-4 py-2 text-sm hover:bg-slate-100">
           Скасувати
