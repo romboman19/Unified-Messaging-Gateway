@@ -1,9 +1,10 @@
 import { Controller, Get, Query, UseGuards } from '@nestjs/common';
 import { SessionGuard } from '../auth/session.guard';
+import { SessionOrTokenGuard } from '../auth/session-or-token.guard';
 import { AuditLogsService } from './audit-logs.service';
 
 @Controller('audit-logs')
-@UseGuards(SessionGuard)
+@UseGuards(SessionOrTokenGuard)
 export class AuditLogsController {
   constructor(private readonly service: AuditLogsService) {}
 
