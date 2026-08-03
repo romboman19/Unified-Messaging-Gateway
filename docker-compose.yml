@@ -104,6 +104,13 @@ services:
     networks:
       - backend
       - transports
+      # Worker delivers to arbitrary Destination endpoints (generic
+      # webhook/n8n, SMTP, Telegram Bot API) per the target topology in
+      # docs/architecture/overview.md §2. `backend` and `transports` are
+      # both `internal: true`, so without this the worker has no route
+      # off the docker bridge at all and every delivery fails with
+      # "fetch failed" (DNS ESERVFAIL, empty Gateway on both networks).
+      - egress
     depends_on:
       - postgres
       - redis
@@ -236,6 +243,13 @@ networks:
     internal: true
   transports:
     internal: true
+  # Outbound-capable network for umg-worker's generic Destination delivery
+  # (webhook/n8n, SMTP, Telegram). Kept separate from `frontend` (scoped to
+  # nginx/web, not workers) and from `transports-egress` (docker-compose.prod.yml,
+  # reserved for the Signal/WhatsApp vendor sidecars per ADR-002) so opening
+  # egress for generic deliveries stays an explicit, single-purpose network.
+  egress:
+    internal: false
 
 volumes:
   umg-postgres-data:
