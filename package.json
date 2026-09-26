@@ -16,6 +16,7 @@
     "db:migrate": "npm run db:migrate --workspace=packages/database",
     "db:seed": "npm run db:seed --workspace=packages/database",
     "test": "npm run test --workspaces --if-present",
+    "test:sms": "node --test tests/sms-grouping.test.cjs",
     "lint": "npm run lint --workspaces --if-present",
     "dev:api": "npm run start:dev --workspace=apps/api",
     "dev:worker": "npm run start:dev --workspace=apps/worker"

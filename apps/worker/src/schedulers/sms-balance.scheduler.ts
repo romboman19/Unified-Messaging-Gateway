@@ -1,6 +1,6 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
-import { PrismaClient } from '@umg/database';
+import { PrismaClient, mergeEndpointConfig } from '@umg/database';
 import type { AccountConfig } from '@umg/channel-sdk';
 import { AdaptersRegistry } from '../adapters/adapters.registry';
 import { AlertsService } from '../alerts/alerts.service';
@@ -73,7 +73,7 @@ export class SmsBalanceScheduler {
 
       try {
         const result = await adapter.checkBalance(accountConfig, line, code);
-        await this.record(endpoint.id, cfg, result);
+        await this.record(endpoint.id, result);
 
         if (!result.ok) {
           this.logger.warn(`Balance check failed for ${line}: ${result.reply}`);
@@ -193,21 +193,14 @@ export class SmsBalanceScheduler {
 
   private async record(
     endpointId: string,
-    cfg: Record<string, unknown>,
     result: { ok: boolean; amount: number | null; currency: string | null; reply: string },
   ): Promise<void> {
-    await this.prisma.endpoint.update({
-      where: { id: endpointId },
-      data: {
-        configJson: {
-          ...cfg,
-          balance: result.amount,
-          balanceCurrency: result.currency,
-          balanceReply: result.reply,
-          balanceCheckedAt: new Date().toISOString(),
-          balanceOk: result.ok,
-        } as never,
-      },
+    await mergeEndpointConfig(this.prisma, endpointId, {
+      balance: result.amount,
+      balanceCurrency: result.currency,
+      balanceReply: result.reply,
+      balanceCheckedAt: new Date().toISOString(),
+      balanceOk: result.ok,
     });
   }
 }

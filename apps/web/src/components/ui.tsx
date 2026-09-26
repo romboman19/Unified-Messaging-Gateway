@@ -80,6 +80,7 @@ export function Badge({ color, children }: { color: string; children: ReactNode 
 }
 
 export const MESSAGE_STATUS_LABEL: Record<MessageStatus, string> = {
+  assembling: 'збираємо частини',
   created: 'створено',
   scheduled: 'заплановано',
   queued: 'в черзі',
@@ -95,6 +96,7 @@ export const MESSAGE_STATUS_LABEL: Record<MessageStatus, string> = {
 };
 
 export const MESSAGE_STATUS_COLOR: Record<MessageStatus, string> = {
+  assembling: 'bg-amber-100 text-amber-700',
   created: 'bg-slate-100 text-slate-600',
   scheduled: 'bg-indigo-100 text-indigo-700',
   queued: 'bg-amber-100 text-amber-700',

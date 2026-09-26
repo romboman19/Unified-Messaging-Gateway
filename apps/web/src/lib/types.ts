@@ -3,6 +3,7 @@ export type MessageDirection = 'inbound' | 'outbound';
 
 export type MessageStatus =
   | 'created'
+  | 'assembling'
   | 'scheduled'
   | 'queued'
   | 'dispatching'
@@ -41,6 +42,10 @@ export interface Message {
   status: MessageStatus;
   toJson: { e164?: string; raw?: string } | null;
   contentJson: { text?: string } | null;
+  metadataJson?: { smsGrouping?: {
+    approximate?: boolean; partCount?: number; manuallyOrdered?: boolean; splitFrom?: string;
+  } };
+  smsParts?: Array<{ id: string; text: string; position: number; receivedAt: string; arrivedAt: string }>;
   createdAt: string;
   updatedAt: string;
   attempts?: MessageAttempt[];
@@ -96,6 +101,7 @@ export interface Endpoint {
   enabled: boolean;
   /** Free-form per-endpoint settings; carries SIM balance state for SMS. */
   configJson?: {
+    smsGrouping?: { enabled: boolean; idleSeconds: number; maxSeconds: number };
     balanceUssd?: string;
     lowBalanceThreshold?: number;
     balance?: number | null;

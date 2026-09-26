@@ -16,6 +16,7 @@ import type {
 import { AdaptersRegistry } from '../adapters/adapters.registry';
 import { EventsService } from '../events/events.service';
 import { InboundMediaService } from './inbound-media.service';
+import { SmsGroupingService } from './sms-grouping.service';
 
 /**
  * Turns a raw vendor payload into persisted inbound messages (TZ §15.1).
@@ -39,6 +40,7 @@ export class InboundIngestService {
     private readonly adapters: AdaptersRegistry,
     private readonly events: EventsService,
     private readonly media: InboundMediaService,
+    private readonly smsGrouping: SmsGroupingService,
   ) {}
 
   /**
@@ -103,6 +105,10 @@ export class InboundIngestService {
 
     let stored = 0;
     for (const inbound of canonical) {
+      if (account.adapter === 'goip-vendor' && inbound.type === 'text' && inbound.direction !== 'outbound') {
+        if (await this.smsGrouping.ingest(inbound, endpoint)) stored++;
+        continue;
+      }
       if (await this.persist(inbound, endpoint, account, adapter, accountConfig)) stored++;
     }
     return stored;

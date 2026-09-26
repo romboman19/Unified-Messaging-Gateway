@@ -9,6 +9,7 @@ import type {
   SendResult,
 } from '@umg/channel-sdk';
 import { makeAddress } from '@umg/channel-sdk';
+import { createHash, randomUUID } from 'node:crypto';
 
 /**
  * Adapter for the DBLtek GoIP SMS Server (TZ §21, ADR-003).
@@ -291,10 +292,11 @@ export class GoipVendorAdapter {
 
     return [
       {
-        // The vendor gives inbound messages no id, so key on line, sender and
-        // timestamp — a replayed message then produces the same id and is
-        // deduplicated upstream.
-        externalId: `${r.goip_line ?? 'line'}:${from}:${receivedAt.getTime()}`,
+        // Include text: distinct fragments can share the same second. Without
+        // a valid timestamp prefer retaining a retry over losing future SMS.
+        externalId: `goip-v2:${Number.isNaN(parsed) ? randomUUID() : createHash('sha256')
+          .update(JSON.stringify([r.goip_line ?? 'line', from, String(r.recv_time), text]))
+          .digest('hex')}`,
         from: makeAddress(from),
         to: [makeAddress(String(endpoint.phoneE164 ?? endpoint.externalId ?? ''))],
         type: 'text',

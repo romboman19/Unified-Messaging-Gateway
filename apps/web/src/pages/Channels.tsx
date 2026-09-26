@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { SmsGroupingSettings } from '../components/SmsGroupingSettings';
 import { api } from '../hooks/useAuth';
 import {
   Trash2,
@@ -119,7 +120,6 @@ export default function ChannelsPage() {
     try {
       await api.patch(`/endpoints/${ep.id}`, {
         config: {
-          ...(ep.configJson ?? {}),
           balanceUssd: ussd.trim(),
           lowBalanceThreshold: Number(threshold) || 0,
         },
@@ -336,6 +336,9 @@ export default function ChannelsPage() {
                             onCancel={() => setBalanceEditing(null)}
                             onSave={(u, t) => saveBalanceSettings(ep, u, t)}
                           />
+                        )}
+                        {acc.adapter === 'goip-vendor' && (
+                          <SmsGroupingSettings endpoint={ep} onSaved={() => void fetchAccounts()} />
                         )}
                         </div>
                       );

@@ -184,6 +184,9 @@ model Message {
   metadataJson    Json             @default("{}") @map("metadata_json")
   rawPayload      Json             @map("raw_payload")
   scheduledAt     DateTime?        @map("scheduled_at")
+  smsGroupKey     String?          @unique @map("sms_group_key")
+  smsGroupDueAt   DateTime?        @map("sms_group_due_at")
+  smsGroupExpiresAt DateTime?      @map("sms_group_expires_at")
   createdAt       DateTime         @default(now()) @map("created_at")
   updatedAt       DateTime         @updatedAt @map("updated_at")
 
@@ -193,10 +196,30 @@ model Message {
   attempts      MessageAttempt[]
   statusHistory MessageStatusHistory[]
   attachments   Attachment[]
+  smsParts      SmsPart[]
 
+  @@index([smsGroupDueAt])
   @@index([endpointId, status, createdAt])
   @@index([createdAt])
   @@map("messages")
+}
+
+model SmsPart {
+  id          String   @id @default(uuid())
+  messageId   String   @map("message_id")
+  endpointId  String   @map("endpoint_id")
+  sourceKey   String   @map("source_key")
+  text        String
+  rawPayload  Json     @map("raw_payload")
+  receivedAt  DateTime @map("received_at")
+  arrivedAt   DateTime @default(now()) @map("arrived_at")
+  position    Int
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@unique([endpointId, sourceKey])
+  @@index([messageId, position])
+  @@map("sms_parts")
 }
 
 model MessageAttempt {
