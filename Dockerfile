@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1
 FROM node:24-alpine AS base
 WORKDIR /app
-RUN apk add --no-cache libc6-compat
-COPY package.json ./
+RUN apk add --no-cache libc6-compat openssl
+COPY package.json package-lock.json ./
 COPY apps/api/package.json ./apps/api/
 COPY apps/worker/package.json ./apps/worker/
 COPY apps/web/package.json ./apps/web/
@@ -10,12 +10,12 @@ COPY packages/contracts/package.json ./packages/contracts/
 COPY packages/database/package.json ./packages/database/
 COPY packages/channel-sdk/package.json ./packages/channel-sdk/
 COPY packages/adapters/package.json ./packages/adapters/
-RUN npm install
+RUN npm ci
 
 FROM base AS build
 COPY . .
-RUN npm run build --workspace=packages/contracts --workspace=packages/database --workspace=packages/channel-sdk --workspace=packages/adapters
 RUN npx prisma generate --schema packages/database/prisma/schema.prisma
+RUN npm run build --workspace=packages/contracts --workspace=packages/database --workspace=packages/channel-sdk --workspace=packages/adapters
 RUN npm run build --workspace=apps/api --workspace=apps/worker
 
 FROM node:24-alpine AS api
@@ -45,13 +45,7 @@ RUN chmod +x /entrypoint.sh
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["node", "apps/worker/dist/main.js"]
 
-FROM node:24-alpine AS web-builder
-WORKDIR /app
-RUN apk add --no-cache libc6-compat
-COPY package.json ./
-COPY apps/web/package.json ./apps/web/
-COPY packages/contracts/package.json ./packages/contracts/
-RUN npm install
+FROM base AS web-builder
 COPY . .
 RUN npm run build --workspace=apps/web
 
