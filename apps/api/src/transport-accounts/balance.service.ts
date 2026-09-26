@@ -8,7 +8,7 @@ import {
 } from '@nestjs/common';
 import { ChannelAdapterRegistry, type AccountConfig } from '@umg/channel-sdk';
 import { registerBuiltinAdapters } from '@umg/adapters';
-import { PrismaClient } from '@umg/database';
+import { PrismaClient, mergeEndpointConfig } from '@umg/database';
 
 export interface BalanceResult {
   amount: number | null;
@@ -81,21 +81,14 @@ export class BalanceService {
     }
 
     const checkedAt = new Date().toISOString();
-    await this.prisma.endpoint.update({
-      where: { id: endpoint.id },
-      data: {
-        configJson: {
-          ...cfg,
-          // Remember the code that worked, so a one-off override becomes the
-          // line's setting and the daily check uses it too.
-          balanceUssd: code,
-          balance: result.amount,
-          balanceCurrency: result.currency,
-          balanceReply: result.reply,
-          balanceCheckedAt: checkedAt,
-          balanceOk: true,
-        } as never,
-      },
+    await mergeEndpointConfig(this.prisma, endpoint.id, {
+      // Remember the code that worked for the next daily check.
+      balanceUssd: code,
+      balance: result.amount,
+      balanceCurrency: result.currency,
+      balanceReply: result.reply,
+      balanceCheckedAt: checkedAt,
+      balanceOk: true,
     });
 
     this.logger.log(

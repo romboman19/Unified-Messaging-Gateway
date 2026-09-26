@@ -1,6 +1,7 @@
-import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { ConflictException, Injectable, NotFoundException, UnprocessableEntityException } from '@nestjs/common';
+import { smsGroupingSettings } from '@umg/channel-sdk';
 import { ChannelType } from '@prisma/client';
-import { PrismaClient, TransportStatus } from '@umg/database';
+import { PrismaClient, TransportStatus, mergeEndpointConfig } from '@umg/database';
 import { Inject } from '@nestjs/common';
 import { AuditService } from '../common/audit.service';
 
@@ -101,6 +102,7 @@ export class TransportAccountsService {
     actorId: string | null,
   ) {
     await this.get(accountId);
+    this.validateSmsGrouping(data.config);
     const endpoint = await this.prisma.endpoint.create({
       data: {
         accountId,
@@ -134,16 +136,20 @@ export class TransportAccountsService {
   ) {
     const before = await this.prisma.endpoint.findUnique({ where: { id } });
     if (!before) throw new NotFoundException('Endpoint не знайдено.');
-    const endpoint = await this.prisma.endpoint.update({
-      where: { id },
-      data: {
-        label: data.label,
-        externalId: data.externalId,
-        phoneRaw: data.phoneRaw,
-        phoneE164: data.phoneE164,
-        enabled: data.enabled,
-        configJson: data.config ? (data.config as never) : undefined,
-      },
+    this.validateSmsGrouping(data.config);
+    const endpoint = await this.prisma.$transaction(async (tx) => {
+      await tx.endpoint.update({
+        where: { id },
+        data: {
+          label: data.label,
+          externalId: data.externalId,
+          phoneRaw: data.phoneRaw,
+          phoneE164: data.phoneE164,
+          enabled: data.enabled,
+        },
+      });
+      if (data.config) await mergeEndpointConfig(tx, id, data.config);
+      return tx.endpoint.findUniqueOrThrow({ where: { id } });
     });
     await this.audit.log(actorId, 'endpoint.updated', 'endpoint', endpoint.id, before, {
       id: endpoint.id,
@@ -151,6 +157,15 @@ export class TransportAccountsService {
       enabled: endpoint.enabled,
     });
     return endpoint;
+  }
+
+  private validateSmsGrouping(config?: Record<string, unknown>) {
+    if (config?.smsGrouping === undefined) return;
+    try {
+      smsGroupingSettings(config.smsGrouping);
+    } catch (error) {
+      throw new UnprocessableEntityException((error as Error).message);
+    }
   }
 
   /**

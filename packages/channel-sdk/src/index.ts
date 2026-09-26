@@ -3,3 +3,4 @@ export * from './adapter.js';
 export * from './registry.js';
 export * from './phone.js';
 export * from './provisioning.js';
+export * from './sms-grouping.js';

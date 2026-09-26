@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { BullModule } from '@nestjs/bullmq';
 import { MessagesController } from './messages.controller';
 import { MessagesService } from './messages.service';
+import { SmsCorrectionsService } from './sms-corrections.service';
 import { QueueService, WEBHOOK_DELIVER_QUEUE } from '../queue/queue.service';
 
 @Module({
@@ -19,7 +20,7 @@ import { QueueService, WEBHOOK_DELIVER_QUEUE } from '../queue/queue.service';
     ),
   ],
   controllers: [MessagesController],
-  providers: [MessagesService, QueueService],
+  providers: [MessagesService, SmsCorrectionsService, QueueService],
   exports: [MessagesService],
 })
 export class MessagesModule {}

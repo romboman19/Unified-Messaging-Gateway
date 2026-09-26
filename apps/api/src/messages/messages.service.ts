@@ -209,7 +209,7 @@ export class MessagesService {
         take: filters.take,
         skip: filters.skip,
         orderBy: { createdAt: 'desc' },
-        include: { attempts: true, statusHistory: true },
+        include: { attempts: true, statusHistory: true, smsParts: { orderBy: { position: 'asc' } } },
       }),
       this.prisma.message.count({ where }),
     ]);
@@ -219,7 +219,7 @@ export class MessagesService {
   async get(id: string) {
     const message = await this.prisma.message.findUnique({
       where: { id },
-      include: { attempts: true, statusHistory: true },
+      include: { attempts: true, statusHistory: true, smsParts: { orderBy: { position: 'asc' } } },
     });
     if (!message) throw new NotFoundException('Повідомлення не знайдено.');
     return message;
