@@ -45,43 +45,41 @@ export class EventsService {
    * a repeated key is skipped without creating a duplicate outbox record.
    */
   async emit(params: EmitEventParams): Promise<EmitEventResult> {
-    const envelope = this.buildEnvelope(params);
     try {
-      const event = await this.prisma.$transaction(async (tx) => {
-        const created = await tx.messageEvent.create({
-          data: {
-            dedupKey: params.dedupKey ?? null,
-            eventType: params.type,
-            aggregateId: params.aggregateId ?? null,
-            channelType: params.channel ?? null,
-            accountId: params.accountId ?? null,
-            endpointId: params.endpointId ?? null,
-            payload: envelope as unknown as Prisma.InputJsonValue,
-          },
-        });
-        await tx.eventOutbox.create({
-          data: {
-            eventType: params.type,
-            aggregateId: params.aggregateId ?? created.id,
-            payload: { messageEventId: created.id },
-          },
-        });
-        return created;
-      });
+      const event = await this.prisma.$transaction((tx) => this.emitInTransaction(tx, params));
       this.logger.debug(`Event ${params.type} persisted as ${event.id}`);
       return { event, created: true };
     } catch (err) {
       if (params.dedupKey && err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
-        const existing = await this.prisma.messageEvent.findUnique({
-          where: { dedupKey: params.dedupKey },
-        });
-        if (existing) {
-          this.logger.debug(`Event ${params.type} deduplicated by key ${params.dedupKey}`);
-          return { event: existing, created: false };
-        }
+        const existing = await this.prisma.messageEvent.findUnique({ where: { dedupKey: params.dedupKey } });
+        if (existing) return { event: existing, created: false };
       }
       throw err;
     }
+  }
+
+  /** Caller serializes the aggregate; a failure rolls back its state too. */
+  async emitInTransaction(tx: Prisma.TransactionClient, params: EmitEventParams): Promise<MessageEvent> {
+    const envelope = this.buildEnvelope(params);
+    const created = await tx.messageEvent.create({
+      data: {
+        dedupKey: params.dedupKey ?? null,
+        eventType: params.type,
+        aggregateId: params.aggregateId ?? null,
+        channelType: params.channel ?? null,
+        accountId: params.accountId ?? null,
+        endpointId: params.endpointId ?? null,
+        payload: envelope as unknown as Prisma.InputJsonValue,
+      },
+    });
+    await tx.eventOutbox.create({
+      data: {
+        eventType: params.type,
+        aggregateId: params.aggregateId ?? created.id,
+        payload: { messageEventId: created.id },
+      },
+    });
+    return created;
   }
 
   private buildEnvelope(params: EmitEventParams): CloudEventEnvelope {

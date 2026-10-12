@@ -1,0 +1,16 @@
+.git
+.env
+.env.*
+**/node_modules
+**/dist
+**/*.tsbuildinfo
+data
+media
+backups
+logs
+*.log
+coverage
+test-results
+playwright-report
+.codex
+.agents

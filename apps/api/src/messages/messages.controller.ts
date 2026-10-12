@@ -17,10 +17,27 @@ import { ApiTokenGuard } from '../auth/api-token.guard';
 import { SessionGuard } from '../auth/session.guard';
 import { SessionOrTokenGuard } from '../auth/session-or-token.guard';
 import { SendMessageDto } from './send-message.dto';
+import { SmsCorrectionsService } from './sms-corrections.service';
+import { SmsOrderDto } from './sms-order.dto';
 
 @Controller('messages')
 export class MessagesController {
-  constructor(private readonly messages: MessagesService) {}
+  constructor(
+    private readonly messages: MessagesService,
+    private readonly smsCorrections: SmsCorrectionsService,
+  ) {}
+
+  @Post(':id/sms-order')
+  @UseGuards(SessionGuard)
+  reorderSms(@Param('id') id: string, @Body() body: SmsOrderDto, @Req() req: Request) {
+    return this.smsCorrections.correct(id, body.partIds, (req as any).user.id);
+  }
+
+  @Post(':id/sms-split')
+  @UseGuards(SessionGuard)
+  splitSms(@Param('id') id: string, @Req() req: Request) {
+    return this.smsCorrections.correct(id, null, (req as any).user.id);
+  }
 
   @Post()
   @UseGuards(ApiTokenGuard)

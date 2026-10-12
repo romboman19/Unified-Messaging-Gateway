@@ -1,4 +1,5 @@
 import { Fragment, useState } from 'react';
+import { SmsParts } from '../components/SmsParts';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ChevronDown, ChevronRight, RotateCcw, XCircle } from 'lucide-react';
 import { api } from '../hooks/useAuth';
@@ -15,6 +16,7 @@ import { apiError, formatDate, prettyJson, shortId } from '../lib/format';
 
 const STATUS_OPTIONS: { value: '' | MessageStatus; label: string }[] = [
   { value: '', label: 'Усі статуси' },
+  { value: 'assembling', label: 'Збираємо частини SMS' },
   { value: 'scheduled', label: 'Заплановано' },
   { value: 'queued', label: 'В черзі' },
   { value: 'sent', label: 'Надіслано' },
@@ -35,6 +37,7 @@ export default function MessagesPage() {
   const [actionError, setActionError] = useState('');
 
   const { data, isLoading, isError } = useQuery({
+    refetchInterval: 5000,
     queryKey: ['messages', { status, channel, direction, q }],
     queryFn: async () =>
       (
@@ -174,6 +177,12 @@ export default function MessagesPage() {
                       <Badge color={MESSAGE_STATUS_COLOR[m.status]}>
                         {MESSAGE_STATUS_LABEL[m.status]}
                       </Badge>
+                      {m.metadataJson?.smsGrouping?.approximate && (
+                        <div className="mt-1 text-xs text-amber-700">
+                          Частин: {m.metadataJson.smsGrouping.partCount}
+                          {m.metadataJson.smsGrouping.manuallyOrdered ? ' · порядок виправлено' : ' · приблизно'}
+                        </div>
+                      )}
                     </td>
                     <td className="p-3">{m.attempts?.length ?? 0}</td>
                     <td className="p-3 whitespace-nowrap">{formatDate(m.createdAt)}</td>
@@ -212,6 +221,9 @@ export default function MessagesPage() {
                     <tr className="border-b bg-slate-50">
                       <td colSpan={11} className="p-4">
                         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                          {!!m.smsParts?.length && (
+                            <SmsParts key={m.id + m.updatedAt} message={m} />
+                          )}
                           <div className="rounded border bg-white p-3">
                             <div className="mb-2 text-xs font-semibold uppercase text-slate-500">
                               Текст
