@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException, UnprocessableEntityException, ConflictException } from '@nestjs/common';
 import { PrismaClient, Prisma, MessageStatus, ChannelType, MessageDirection } from '@umg/database';
 import { SendMessageResponse } from '@umg/contracts';
+import { toE164 } from '@umg/channel-sdk';
 import { Inject } from '@nestjs/common';
 import { QueueService } from '../queue/queue.service';
 import { AuditService } from '../common/audit.service';
@@ -283,20 +284,30 @@ export class MessagesService {
    * new one.
    */
   private async findOrCreateConversation(endpointId: string, channel: ChannelType, to: string) {
-    const peer = to.startsWith('+') ? to : `+${to.replace(/\D/g, '')}`;
-    const existing = await this.prisma.conversation.findFirst({
-      where: { endpointId, peerPhoneE164: peer },
-    });
+    // Same normaliser inbound ingestion uses (via makeAddress), so "0671112233"
+    // here and "+380671112233" from the carrier meet on one thread.
+    const peer = toE164(to);
+    const where = peer ? { endpointId, peerPhoneE164: peer } : { endpointId, peerId: to };
+    const existing = await this.prisma.conversation.findFirst({ where });
     if (existing) return existing;
-    return this.prisma.conversation.create({
-      data: {
-        channelType: channel,
-        endpointId,
-        peerId: to,
-        peerPhoneE164: peer,
-        lastMessageAt: new Date(),
-      },
-    });
+    try {
+      return await this.prisma.conversation.create({
+        data: {
+          channelType: channel,
+          endpointId,
+          peerId: to,
+          peerPhoneE164: peer,
+          lastMessageAt: new Date(),
+        },
+      });
+    } catch (err) {
+      // Lost the race to an inbound message from the same peer: use theirs.
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+        const winner = await this.prisma.conversation.findFirst({ where });
+        if (winner) return winner;
+      }
+      throw err;
+    }
   }
 
   private hashRequest(dto: SendMessageDto): string {

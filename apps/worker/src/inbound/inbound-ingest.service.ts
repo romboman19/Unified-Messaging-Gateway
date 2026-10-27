@@ -256,9 +256,15 @@ export class InboundIngestService {
       },
     });
 
-    await this.prisma.conversation.update({
-      where: { id: conversation.id },
-      data: { lastMessageAt: inbound.receivedAt ?? new Date() },
+    // Only ever forward: a late or replayed message must not push an active
+    // thread down the list.
+    const at = inbound.receivedAt ?? new Date();
+    await this.prisma.conversation.updateMany({
+      where: {
+        id: conversation.id,
+        OR: [{ lastMessageAt: null }, { lastMessageAt: { lt: at } }],
+      },
+      data: { lastMessageAt: at },
     });
 
     // Pull the files down before the sidecar loses them. Done after the
@@ -302,22 +308,31 @@ export class InboundIngestService {
     peerPhone: string | null,
     peerRaw: string | null,
   ) {
-    const existing = await this.prisma.conversation.findFirst({
-      where: {
-        endpointId,
-        ...(peerPhone ? { peerPhoneE164: peerPhone } : { peerId: peerRaw }),
-      },
-    });
+    const where = {
+      endpointId,
+      ...(peerPhone ? { peerPhoneE164: peerPhone } : { peerId: peerRaw }),
+    };
+    const existing = await this.prisma.conversation.findFirst({ where });
     if (existing) return existing;
-    return this.prisma.conversation.create({
-      data: {
-        channelType,
-        endpointId,
-        peerId: peerRaw,
-        peerPhoneE164: peerPhone,
-        lastMessageAt: new Date(),
-      },
-    });
+    try {
+      return await this.prisma.conversation.create({
+        data: {
+          channelType,
+          endpointId,
+          peerId: peerRaw,
+          peerPhoneE164: peerPhone,
+          lastMessageAt: new Date(),
+        },
+      });
+    } catch (err) {
+      // Another message from the same peer (an outbound send, or a second
+      // inbound job) created the thread between our lookup and insert.
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+        const winner = await this.prisma.conversation.findFirst({ where });
+        if (winner) return winner;
+      }
+      throw err;
+    }
   }
 }
 
