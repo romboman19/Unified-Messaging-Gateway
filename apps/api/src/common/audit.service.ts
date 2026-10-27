@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaClient } from '@umg/database';
 import { Inject } from '@nestjs/common';
+import { redactSecrets } from './redact';
 
 @Injectable()
 export class AuditService {
@@ -20,8 +21,8 @@ export class AuditService {
         action,
         entityType,
         entityId,
-        beforeJson: (before ?? {}) as never,
-        afterJson: (after ?? {}) as never,
+        beforeJson: redactSecrets(before ?? {}) as never,
+        afterJson: redactSecrets(after ?? {}) as never,
       },
     });
   }

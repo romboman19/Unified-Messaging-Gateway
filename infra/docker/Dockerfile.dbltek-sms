@@ -62,11 +62,32 @@ RUN set -eux; \
 
 # The app expects to be reachable at /goip, which is also what the GoIP
 # hardware and the vendor's own API paths assume.
+#
+# The tree is root-owned and not writable by Apache. The vendor's installer
+# makes it 777, which turns any file-write bug in the legacy PHP (or an upload
+# form) into a webshell. PHP keeps its sessions in /tmp, goipcron runs as root,
+# and config.inc.php is rewritten by the entrypoint as root, so nothing here
+# needs www-data write access. If a vendor feature turns out to write into its
+# own tree, grant www-data that one directory rather than reopening the lot.
 RUN set -eux; \
     ln -s /usr/local/goip /var/www/html/goip; \
-    chmod -R 777 /usr/local/goip; \
     mv /usr/local/goip/goipcron_x64 /usr/local/goip/goipcron; \
-    chmod +x /usr/local/goip/goipcron
+    chown -R root:root /usr/local/goip; \
+    find /usr/local/goip -type d -exec chmod 755 {} +; \
+    find /usr/local/goip -type f -exec chmod 644 {} +; \
+    chmod 755 /usr/local/goip/goipcron
+
+# Apache and PHP hardening for a codebase we cannot patch (docs/architecture/
+# security.md §3). These cut what a bug in the vendor PHP can reach rather
+# than fix the bugs themselves: no directory listings, no downloading the SQL
+# dump or the daemon binary, no version banners, and session cookies that
+# page scripts cannot read.
+COPY dbltek-sms/apache-hardening.conf /etc/apache2/conf-available/zz-goip-hardening.conf
+COPY dbltek-sms/php-hardening.ini /usr/local/etc/php/conf.d/zz-goip-hardening.ini
+RUN set -eux; \
+    a2enmod headers > /dev/null; \
+    a2disconf serve-cgi-bin > /dev/null 2>&1 || true; \
+    a2enconf zz-goip-hardening > /dev/null
 
 # The vendor code is PHP 5-era and emits notices and warnings on normal pages.
 # Showing them corrupts the HTML (and breaks session_start by sending output
