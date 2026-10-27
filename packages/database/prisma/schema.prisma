@@ -165,6 +165,10 @@ model Conversation {
   endpoint Endpoint @relation(fields: [endpointId], references: [id])
   messages Message[]
 
+  // One thread per (endpoint, peer number). Without it two messages from the
+  // same sender processed at once both miss the lookup and open two threads,
+  // and later messages land in whichever one findFirst happens to return.
+  @@unique([endpointId, peerPhoneE164])
   @@map("conversations")
 }
 

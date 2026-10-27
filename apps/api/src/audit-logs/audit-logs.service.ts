@@ -1,5 +1,6 @@
 import { Injectable, Inject } from '@nestjs/common';
 import { PrismaClient } from '@umg/database';
+import { redactSecrets } from '../common/redact';
 
 @Injectable()
 export class AuditLogsService {
@@ -15,7 +16,15 @@ export class AuditLogsService {
       }),
       this.prisma.auditLog.count(),
     ]);
-    return { items, count };
+    // Rows written before redaction existed still hold plaintext credentials.
+    return {
+      items: items.map((row) => ({
+        ...row,
+        beforeJson: redactSecrets(row.beforeJson),
+        afterJson: redactSecrets(row.afterJson),
+      })),
+      count,
+    };
   }
 
   async listEvents(opts: { type?: string; take: number; skip: number }) {

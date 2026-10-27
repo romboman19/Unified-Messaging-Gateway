@@ -17,16 +17,28 @@ export function toE164(input: string, defaultCountry = '+380'): string | null {
   const trimmed = input.trim();
   // Already in E.164 shape.
   if (/^\+\d{7,15}$/.test(trimmed)) return trimmed;
-  // Strip non-digits.
-  const digits = trimmed.replace(/\D+/g, '');
-  if (!digits) return null;
+  // Strip non-digits. Alphanumeric senders ("PrivatBank") have none, or only a
+  // few, and are not phone numbers at all.
+  let digits = trimmed.replace(/\D+/g, '');
+  if (/[A-Za-z]/.test(trimmed)) return null;
+  // "00" is the international dialling prefix: 00380… is +380….
+  if (digits.startsWith('00')) digits = digits.slice(2);
+  // Short codes ("7000", "111") have no E.164 form; inventing one would key
+  // their threads on a number that does not exist.
+  if (digits.length < 9 || digits.length > 15) return null;
+  const cc = defaultCountry.replace(/^\+/, '');
+  // National format with the trunk prefix: 0671112233 → +380671112233. Without
+  // this the result was +3800671112233, which matches nothing we send to, so
+  // a carrier that reports senders nationally split every thread in two.
+  if (digits.startsWith('0') && digits.length === 10) {
+    return `+${cc}${digits.slice(1)}`;
+  }
   // If the digits already start with the country code (assumed to be 3 digits
   // when not prefixed with `+`), keep as-is.
-  if (digits.length >= 11 && digits.length <= 15) {
+  if (digits.length >= 11) {
     return `+${digits}`;
   }
   // Otherwise prepend the default country code without its leading `+`.
-  const cc = defaultCountry.replace(/^\+/, '');
   return `+${cc}${digits}`;
 }
 
