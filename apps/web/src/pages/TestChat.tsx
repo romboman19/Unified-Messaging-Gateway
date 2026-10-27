@@ -155,12 +155,16 @@ export default function TestChatPage() {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages.data?.items.length]);
 
-  // Opening a conversation targets its peer on its own channel.
+  // Opening a conversation targets its peer on its own channel, and from the
+  // same number (SIM) the thread lives on. Leaving the endpoint blank let the
+  // API pick the first one, so on a multi-SIM GoIP a reply went out from
+  // another SIM — the recipient saw a stranger and the reply opened a second
+  // thread on that SIM.
   useEffect(() => {
     if (!selected) return;
     setTo(selected.peerPhoneE164 ?? '');
     setChannel(selected.channelType);
-    setEndpointId('');
+    setEndpointId(selected.endpointId);
     setSendError('');
   }, [selectedId]);
 
