@@ -19,6 +19,9 @@ networks:
   backend:
     internal: true
     name: umg_backend
+  egress:
+    internal: false
+    name: umg_egress
   frontend:
     internal: false
     name: umg_frontend
@@ -85,7 +88,7 @@ services:
       frontend: null
       transports: null
     ports:
-      - ${SMS_WEB_PORT:-8084}:80
+      - ${SMS_WEB_BIND:-127.0.0.1}:${SMS_WEB_PORT:-8084}:80
       - 44444:44444/udp
     restart: unless-stopped
   dbsms-vendor:
@@ -336,6 +339,7 @@ services:
       UNOAPI_BASE_URL: ${UNOAPI_BASE_URL:-}
     networks:
       backend: null
+      egress: null
       transports: null
     restart: unless-stopped
     volumes:

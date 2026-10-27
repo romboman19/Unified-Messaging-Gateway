@@ -9,7 +9,7 @@ import {
   Req,
   UnauthorizedException,
 } from '@nestjs/common';
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import type { RawBodyRequest } from '@nestjs/common';
 import type { Request } from 'express';
 import { InboundQueueService } from './inbound-queue.service';
@@ -66,11 +66,10 @@ export class InboundWebhooksController {
    * Settings: `{ goip_line, from_number, content, recv_time }`.
    *
    * Unlike gwmd it signs nothing — the vendor offers no signature or token on
-   * this callback at all. The only thing protecting it is the network: the SMS
-   * Server sits on the internal `transports` network, so nothing off-host can
-   * reach this route. A shared secret in the query string is accepted when
-   * `DBSMS_WEBHOOK_SECRET` is set, since the forwarding URL is free-form and
-   * can carry one.
+   * this callback at all — so the forwarding URL carries `DBSMS_WEBHOOK_SECRET`
+   * in its query string (the SMS Server's entrypoint builds it). The secret is
+   * mandatory: anyone who can reach this route could otherwise inject forged
+   * inbound SMS, and routing rules would fan them out to every destination.
    */
   @Post('dbsms')
   @HttpCode(200)
@@ -79,12 +78,24 @@ export class InboundWebhooksController {
     @Body() body: Record<string, unknown>,
   ) {
     const expected = process.env.DBSMS_WEBHOOK_SECRET ?? '';
-    if (expected && secret !== expected) {
+    if (!expected) {
+      this.logger.error('DBSMS_WEBHOOK_SECRET is not set; rejecting webhook');
+      throw new UnauthorizedException('Webhook secret not configured.');
+    }
+    if (!this.secretMatches(secret, expected)) {
       this.logger.warn('Rejected dbsms webhook with a bad secret');
       throw new UnauthorizedException('Bad secret.');
     }
     await this.queue.enqueueInbound('goip-vendor', body);
     return { ok: true };
+  }
+
+  /** Constant-time compare; hashing first evens out the lengths. */
+  private secretMatches(received: string | undefined, expected: string): boolean {
+    if (typeof received !== 'string') return false;
+    const a = createHash('sha256').update(received).digest();
+    const b = createHash('sha256').update(expected).digest();
+    return timingSafeEqual(a, b);
   }
 
   private verify(

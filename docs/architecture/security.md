@@ -62,6 +62,16 @@ of the mandatory backup set (§31).
 - The vendor (DBLtek) container is **not reachable from the LAN** and SHOULD
   have no internet egress; its legacy PHP/MySQL stack is isolated on its own
   network.
+- The vendor code itself cannot be patched (it is fetched at build time and
+  not redistributable), so its container limits what a bug in it can reach:
+  web UI published on loopback only (`SMS_WEB_BIND`), tree root-owned and
+  read-only to Apache, schema dumps / daemon binary / backups not servable,
+  no directory listings or version banners, shell-exec PHP functions disabled
+  (`SMS_PHP_DISABLE_FUNCTIONS`), HttpOnly session cookies, DB root password
+  and webhook secret scrubbed from the environment before Apache starts.
+- Vendor webhook routes (`/api/v1/webhooks/*`) are not proxied: sidecars call
+  `umg-api:4000` directly, and `dbsms` rejects every call while
+  `DBSMS_WEBHOOK_SECRET` is unset.
 - Compose hardening: exact image tags, `restart: unless-stopped`,
   healthchecks, non-root users, read-only root filesystems where possible, no
   Docker socket mounts, log rotation, `TZ=Europe/Kyiv`.

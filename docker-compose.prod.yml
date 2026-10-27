@@ -174,8 +174,11 @@ services:
       SMS_FORWARD_URL: ${SMS_FORWARD_URL:-}
       TZ: Europe/Kyiv
     ports:
-      # Vendor web UI — the admin adds the GoIP and its lines here.
-      - "${SMS_WEB_PORT:-8084}:80"
+      # Vendor web UI — the admin adds the GoIP and its lines here. It is a
+      # legacy PHP 5.6 app with a root/root default login, so it listens on
+      # loopback only: reach it through an SSH tunnel, or set SMS_WEB_BIND to
+      # the host's management-VLAN address. Never 0.0.0.0 on a shared LAN.
+      - "${SMS_WEB_BIND:-127.0.0.1}:${SMS_WEB_PORT:-8084}:80"
       # The gateway registers here. Must stay 44444 unless the same port is
       # changed on every line of the hardware.
       - "44444:44444/udp"

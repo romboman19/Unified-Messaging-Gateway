@@ -56,9 +56,12 @@ export class ConversationsService {
     const [items, count] = await Promise.all([
       this.prisma.message.findMany({
         where: { conversationId: id },
+        // Newest first, so a page is the *latest* N messages; flipped back to
+        // chronological below. Ordering ascending returned the oldest 100, and
+        // once a thread outgrew that nothing new ever appeared in it.
         take: opts.take,
         skip: opts.skip,
-        orderBy: { createdAt: 'asc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         include: {
           _count: { select: { attempts: true, statusHistory: true } },
           // The last attempt carries why a send failed. Without it the UI can
@@ -77,6 +80,7 @@ export class ConversationsService {
       }),
       this.prisma.message.count({ where: { conversationId: id } }),
     ]);
+    items.reverse();
     return {
       items: items.map(({ attempts, ...m }) => ({
         ...m,

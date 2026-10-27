@@ -8,6 +8,7 @@ import type {
   EndpointConfig,
   SendResult,
 } from '@umg/channel-sdk';
+import { createHash } from 'node:crypto';
 import { makeAddress } from '@umg/channel-sdk';
 
 /**
@@ -274,7 +275,7 @@ export class GoipVendorAdapter {
    * System Settings: `{ goip_line, from_number, content, recv_time }`.
    */
   normalizeInbound(
-    _account: AccountConfig,
+    account: AccountConfig,
     endpoint: EndpointConfig,
     raw: unknown,
   ): CanonicalInbound[] {
@@ -284,17 +285,32 @@ export class GoipVendorAdapter {
     const text = String(r.content ?? '');
     if (!from || !text) return [];
 
-    // "YYYY-MM-DD hh:mm:ss" in the server's local timezone. A space-separated
-    // stamp parses inconsistently across engines, so normalise the separator.
-    const parsed = r.recv_time ? Date.parse(String(r.recv_time).replace(' ', 'T')) : NaN;
-    const receivedAt = Number.isNaN(parsed) ? new Date() : new Date(parsed);
+    // "YYYY-MM-DD hh:mm:ss" in the SMS Server's wall-clock time, with no
+    // offset. Parsed as-is it was read in the *worker's* zone (UTC), so every
+    // SMS landed 2–3 h in the future: replies sorted after messages sent
+    // later, and the thread jumped to the top of the list for hours.
+    const tz =
+      String(account.configJson?.['timezone'] ?? '') ||
+      process.env.DBSMS_TIMEZONE ||
+      'Europe/Kyiv';
+    const parsed = r.recv_time ? parseWallClock(String(r.recv_time), tz) : null;
+    // A gateway with a drifting clock is not allowed to date messages ahead of
+    // their arrival.
+    const now = Date.now();
+    const receivedAt = new Date(parsed === null || parsed > now + 60_000 ? now : parsed);
+
+    // Hash of the text rather than the text itself, to keep the id short.
+    const digest = createHash('sha256').update(text).digest('hex').slice(0, 16);
 
     return [
       {
-        // The vendor gives inbound messages no id, so key on line, sender and
-        // timestamp — a replayed message then produces the same id and is
-        // deduplicated upstream.
-        externalId: `${r.goip_line ?? 'line'}:${from}:${receivedAt.getTime()}`,
+        // The vendor gives inbound messages no id, so key on line, sender,
+        // timestamp and content — a replayed message then produces the same id
+        // and is deduplicated upstream. The timestamp has one-second
+        // resolution, so without the content two different SMS from one sender
+        // in the same second (the parts of a long SMS, a bank's paired
+        // notifications) collided and the second was silently dropped.
+        externalId: `${r.goip_line ?? 'line'}:${from}:${parsed ?? receivedAt.getTime()}:${digest}`,
         from: makeAddress(from),
         to: [makeAddress(String(endpoint.phoneE164 ?? endpoint.externalId ?? ''))],
         type: 'text',
@@ -495,4 +511,40 @@ export function parseBalance(reply: string): { amount: number | null; currency: 
 function normaliseCurrency(raw: string): string {
   const c = raw.toLowerCase();
   return c === 'grn' || c === 'hrn' || c === 'грн' || c === '₴' ? 'uah' : c;
+}
+
+/**
+ * Reads "YYYY-MM-DD hh:mm:ss" as wall-clock time in `timeZone` and returns
+ * epoch milliseconds, or null when the stamp or zone is unusable.
+ */
+export function parseWallClock(stamp: string, timeZone: string): number | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/.exec(stamp.trim());
+  if (!m) return null;
+  const [y, mo, d, h, mi, s] = m.slice(1).map((v) => Number(v ?? 0));
+  const asUtc = Date.UTC(y, mo - 1, d, h, mi, s);
+  try {
+    // The zone's offset at that instant; evaluated twice so a stamp near a DST
+    // switch uses the offset in force on the far side of it.
+    let ts = asUtc - zoneOffset(asUtc, timeZone);
+    ts = asUtc - zoneOffset(ts, timeZone);
+    return ts;
+  } catch {
+    return null;
+  }
+}
+
+function zoneOffset(epochMs: number, timeZone: string): number {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    hourCycle: 'h23',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  }).formatToParts(new Date(epochMs));
+  const get = (t: string) => Number(parts.find((p) => p.type === t)?.value);
+  const wall = Date.UTC(get('year'), get('month') - 1, get('day'), get('hour'), get('minute'), get('second'));
+  return wall - Math.floor(epochMs / 1000) * 1000;
 }
