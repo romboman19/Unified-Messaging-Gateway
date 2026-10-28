@@ -16,6 +16,12 @@ import type {
 import { AdaptersRegistry } from '../adapters/adapters.registry';
 import { EventsService } from '../events/events.service';
 import { InboundMediaService } from './inbound-media.service';
+import { assembleParts, looksLikeIncompletePart, repairGluedParts } from './sms-concat';
+
+/** How long a part set must stay quiet before it is treated as complete. */
+const CONCAT_QUIET_MS = Number(process.env.SMS_CONCAT_QUIET_SECONDS ?? 20) * 1000;
+/** Upper bound on holding any part, complete-looking or not. */
+const CONCAT_MAX_MS = Number(process.env.SMS_CONCAT_MAX_SECONDS ?? 180) * 1000;
 
 /**
  * Turns a raw vendor payload into persisted inbound messages (TZ §15.1).
@@ -103,8 +109,135 @@ export class InboundIngestService {
 
     let stored = 0;
     for (const inbound of canonical) {
+      if (account.type === 'sms' && (await this.bufferIfPart(inbound, endpoint.id))) continue;
       if (await this.persist(inbound, endpoint, account, adapter, accountConfig)) stored++;
     }
+    return stored;
+  }
+
+  /**
+   * Holds an SMS segment back until its siblings arrive (see sms-concat.ts).
+   * A text is held when it fills a segment exactly, or when the same sender
+   * already has segments waiting — the short final part often arrives before
+   * the middle ones. Anything else is an ordinary SMS and goes straight on.
+   *
+   * Returns true when the message was buffered instead of stored.
+   */
+  private async bufferIfPart(inbound: CanonicalInbound, endpointId: string): Promise<boolean> {
+    const content = (inbound.content ?? {}) as { text?: string; meta?: Record<string, unknown> };
+    const original = content.text ?? '';
+    if (!original) return false;
+    const text = repairGluedParts(original);
+    if (text !== original) {
+      inbound.content = { ...content, text, meta: { ...(content.meta ?? {}), originalText: original } };
+      this.logger.log(`Reordered glued SMS segments from ${inbound.from.raw}`);
+    }
+
+    const sender = inbound.from.raw;
+    const waiting = await this.prisma.smsPartBuffer.findMany({
+      where: { endpointId, sender },
+      select: { text: true },
+    });
+    if (waiting.length === 0 && !looksLikeIncompletePart(text)) return false;
+    // A retried webhook must not put the same segment in twice.
+    if (waiting.some((w) => w.text === text)) return true;
+
+    await this.prisma.smsPartBuffer.create({
+      data: {
+        endpointId,
+        sender,
+        text,
+        receivedAt: inbound.receivedAt ?? new Date(),
+        inbound: inbound as unknown as Prisma.InputJsonValue,
+      },
+    });
+    return true;
+  }
+
+  /**
+   * Stores every buffered part set that is ready: quiet for CONCAT_QUIET_MS
+   * with its final (short) segment present, or older than CONCAT_MAX_MS.
+   * Called on a timer by SmsConcatScheduler.
+   */
+  async flushSmsParts(now = new Date()): Promise<number> {
+    const rows = await this.prisma.smsPartBuffer.findMany({ orderBy: { arrivedAt: 'asc' } });
+    const groups = new Map<string, typeof rows>();
+    for (const row of rows) {
+      const key = `${row.endpointId}\u0000${row.sender}`;
+      groups.set(key, [...(groups.get(key) ?? []), row]);
+    }
+
+    let stored = 0;
+    for (const parts of groups.values()) {
+      const first = parts[0].arrivedAt.getTime();
+      const last = parts[parts.length - 1].arrivedAt.getTime();
+      const hasFinal = parts.some((p) => !looksLikeIncompletePart(p.text));
+      const ready =
+        (hasFinal && now.getTime() - last >= CONCAT_QUIET_MS) ||
+        now.getTime() - first >= CONCAT_MAX_MS;
+      if (!ready) continue;
+      try {
+        stored += await this.storeParts(parts);
+      } catch (err) {
+        // Left in the buffer; the next tick retries.
+        this.logger.error(`Could not store buffered SMS parts: ${(err as Error).message}`);
+      }
+    }
+    return stored;
+  }
+
+  private async storeParts(
+    parts: { id: string; endpointId: string; text: string; inbound: unknown }[],
+  ): Promise<number> {
+    const endpoint = await this.prisma.endpoint.findUnique({ where: { id: parts[0].endpointId } });
+    const account = endpoint
+      ? await this.prisma.transportAccount.findUnique({ where: { id: endpoint.accountId } })
+      : null;
+    const adapter = account ? this.adapters.get(account.adapter) : null;
+    if (!endpoint || !account || !adapter) {
+      this.logger.warn('Dropping buffered SMS parts: endpoint or account no longer exists');
+      await this.prisma.smsPartBuffer.deleteMany({ where: { id: { in: parts.map((p) => p.id) } } });
+      return 0;
+    }
+    const accountConfig: AccountConfig = {
+      id: account.id,
+      adapter: account.adapter,
+      configJson: (account.encryptedConfig as Record<string, unknown>) ?? {},
+    };
+
+    const revive = (p: { inbound: unknown }): CanonicalInbound => {
+      const i = p.inbound as CanonicalInbound & { receivedAt?: string | Date };
+      return { ...i, receivedAt: i.receivedAt ? new Date(i.receivedAt) : new Date() };
+    };
+    const { combined, leftovers } = assembleParts(parts);
+    const messages: CanonicalInbound[] = [];
+    if (combined.length > 0) {
+      const pieces = combined.map(revive);
+      const head = pieces[0];
+      const times = pieces.map((p) => p.receivedAt.getTime());
+      const content = (head.content ?? {}) as { meta?: Record<string, unknown> };
+      messages.push({
+        ...head,
+        // Stable across retries: the same parts always produce the same id.
+        externalId: `concat:${pieces.map((p) => p.externalId).sort().join('|')}`,
+        receivedAt: new Date(Math.min(...times)),
+        content: {
+          ...content,
+          text: combined.map((p) => p.text).join(''),
+          meta: { ...(content.meta ?? {}), parts: combined.length },
+        },
+        rawPayload: { parts: pieces.map((p) => p.rawPayload ?? null) },
+      });
+    }
+    messages.push(...leftovers.map(revive));
+
+    let stored = 0;
+    for (const inbound of messages) {
+      if (await this.persist(inbound, endpoint, account, adapter, accountConfig)) stored++;
+    }
+    // Only after storing: a crash in between replays the set, and the
+    // externalId de-duplication in persist() absorbs it.
+    await this.prisma.smsPartBuffer.deleteMany({ where: { id: { in: parts.map((p) => p.id) } } });
     return stored;
   }
 
