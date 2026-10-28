@@ -1,6 +1,7 @@
 import { Controller, Get } from '@nestjs/common';
 import { PrismaClient } from '@umg/database';
 import { Inject } from '@nestjs/common';
+import { APP_VERSION } from '../common/version';
 
 @Controller('health')
 export class HealthController {
@@ -9,6 +10,12 @@ export class HealthController {
   @Get('live')
   live() {
     return { status: 'ok', service: 'umg-api' };
+  }
+
+  /** Public on purpose: the web panel shows it, including on the login page. */
+  @Get('version')
+  version() {
+    return { service: 'umg-api', version: APP_VERSION };
   }
 
   @Get('ready')
@@ -26,7 +33,7 @@ export class HealthController {
     const dbOk = await this.prisma.$queryRaw`SELECT 1`.then(() => true).catch(() => false);
     return {
       service: 'umg-api',
-      version: process.env.npm_package_version ?? '0.1.0',
+      version: APP_VERSION,
       database: dbOk ? 'healthy' : 'unhealthy',
     };
   }

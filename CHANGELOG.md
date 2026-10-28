@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-10-28
+
+SMS over a real GoIP (DBLtek SMS Server in the stack), WhatsApp and Signal
+end to end, security hardening, and reliable SMS threads.
+
+### Added
+
+- **SMS via GoIP** — DBLtek SMS Server runs in the stack; send, delivery
+  reports, inbound SMS, on-demand and daily SIM balance checks over USSD.
+- **WhatsApp (gwmd) and Signal** — QR pairing from the web wizard, inbound
+  messages, files both ways.
+- **Long SMS reassembly** — segments the GoIP forwards separately and out of
+  order are buffered and stored as one message; text the gateway glued in
+  arrival order (final segment in the middle) is put back in order
+  (`SMS_CONCAT_QUIET_SECONDS`, `SMS_CONCAT_MAX_SECONDS`).
+- **Version display** — the web panel shows its version and warns when the
+  API runs a different one; `GET /api/v1/health/version`.
+- Single-file Portainer stack; API reference on the API tab; file
+  attachments in the test chat.
+
+### Fixed
+
+- SMS threads: one phone normaliser for both directions (national-format
+  numbers split threads), unique thread per peer with a repair migration,
+  GoIP time read in `Europe/Kyiv` (`DBSMS_TIMEZONE`) instead of UTC,
+  same-second SMS no longer dropped as duplicates, thread view shows the
+  latest messages, replies leave from the thread's own SIM.
+- Worker could not reach webhook/SMTP/Telegram destinations (egress network).
+- Deleting a destination with delivery history failed.
+
+### Security
+
+- DBLtek container hardened: no world-writable web root, schema dumps and
+  daemon not servable, shell-exec PHP functions disabled, escaped
+  credentials in generated config/SQL, secrets scrubbed from the PHP
+  environment, vendor UI on loopback by default (`SMS_WEB_BIND`).
+- `dbsms` webhook fails closed without its secret; vendor webhooks are no
+  longer reachable through the reverse proxy.
+- Audit log redacts credentials.
+
 ## [0.2.0] - 2026-07-30
 
 Milestone 1: routing, webhook deliveries, attachments, alerts, documentation set.

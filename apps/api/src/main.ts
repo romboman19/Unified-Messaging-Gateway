@@ -10,6 +10,7 @@ import { createClient } from 'redis';
 import { AppModule } from './app.module';
 import { LoggerService } from './common/logger.service';
 import { OpenApiService } from './openapi/openapi.service';
+import { APP_VERSION } from './common/version';
 
 async function bootstrap() {
   const logger = new LoggerService();
@@ -74,6 +75,6 @@ async function bootstrap() {
 
   const port = config.get('PORT') ?? 4000;
   await app.listen(port, '0.0.0.0');
-  logger.log(`API listening on 0.0.0.0:${port}`);
+  logger.log(`API v${APP_VERSION} listening on 0.0.0.0:${port}`);
 }
 bootstrap();
