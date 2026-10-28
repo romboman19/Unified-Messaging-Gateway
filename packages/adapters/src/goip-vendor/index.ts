@@ -285,19 +285,23 @@ export class GoipVendorAdapter {
     const text = String(r.content ?? '');
     if (!from || !text) return [];
 
-    // "YYYY-MM-DD hh:mm:ss" in the SMS Server's wall-clock time, with no
-    // offset. Parsed as-is it was read in the *worker's* zone (UTC), so every
-    // SMS landed 2–3 h in the future: replies sorted after messages sent
-    // later, and the thread jumped to the top of the list for hours.
+    // "YYYY-MM-DD hh:mm:ss" with no offset. Which zone it is in depends on
+    // how the SMS Server and the GoIP clocks are set up — on the deployed
+    // stack it is UTC, not local time, and reading it as Kyiv time put every
+    // reply two hours before the message it answered. The server forwards
+    // within seconds of receipt, so arrival time is the reliable clock: the
+    // stamp is used only when it agrees with arrival to within a few minutes
+    // (DBSMS_TIMEZONE, default UTC, says how to read it). Either way it stays
+    // in the id below and in the raw payload.
     const tz =
       String(account.configJson?.['timezone'] ?? '') ||
       process.env.DBSMS_TIMEZONE ||
-      'Europe/Kyiv';
+      'UTC';
     const parsed = r.recv_time ? parseWallClock(String(r.recv_time), tz) : null;
-    // A gateway with a drifting clock is not allowed to date messages ahead of
-    // their arrival.
     const now = Date.now();
-    const receivedAt = new Date(parsed === null || parsed > now + 60_000 ? now : parsed);
+    const receivedAt = new Date(
+      parsed === null || Math.abs(parsed - now) > STAMP_TOLERANCE_MS ? now : parsed,
+    );
 
     // Hash of the text rather than the text itself, to keep the id short.
     const digest = createHash('sha256').update(text).digest('hex').slice(0, 16);
@@ -517,6 +521,9 @@ function normaliseCurrency(raw: string): string {
  * Reads "YYYY-MM-DD hh:mm:ss" as wall-clock time in `timeZone` and returns
  * epoch milliseconds, or null when the stamp or zone is unusable.
  */
+/** How far the SMS Server's stamp may disagree with arrival time. */
+const STAMP_TOLERANCE_MS = 5 * 60_000;
+
 export function parseWallClock(stamp: string, timeZone: string): number | null {
   const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/.exec(stamp.trim());
   if (!m) return null;

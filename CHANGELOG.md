@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Inbound SMS showed up two hours before they arrived, so a reply sorted
+  above the message it answered: 0.3.0 read the SMS Server's timestamp as
+  Kyiv time, but it is UTC. Arrival time now wins whenever the stamp
+  disagrees with it by more than 5 minutes (`DBSMS_TIMEZONE` default `UTC`),
+  and a migration moves the affected messages back.
 - The Overview page's "Версія" card showed a hardcoded 0.1.0; it now shows
   the version the API reports.
 
