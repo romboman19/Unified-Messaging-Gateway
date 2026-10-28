@@ -16,6 +16,12 @@ export default function DashboardPage() {
     queryKey: ['dashboard', 'deliveries-dlq'],
     queryFn: async () => (await api.get<ListResponse<Delivery>>('/deliveries', { params: { status: 'dlq', limit: 1 } })).data,
   });
+  // Same query as the sidebar (Layout), so it is fetched once.
+  const apiVersion = useQuery({
+    queryKey: ['api-version'],
+    queryFn: async () => (await api.get<{ version: string }>('/health/version')).data.version,
+    staleTime: 5 * 60_000,
+  });
   const firing = useQuery({
     queryKey: ['dashboard', 'alerts-firing'],
     queryFn: async () => (await api.get<ListResponse<Alert>>('/alerts', { params: { status: 'firing', limit: 1 } })).data,
@@ -89,7 +95,9 @@ export default function DashboardPage() {
         </div>
         <div className="rounded-lg bg-white p-4 shadow">
           <div className="text-sm text-slate-500">Версія</div>
-          <div className="mt-1 text-lg font-semibold">0.1.0</div>
+          <div className="mt-1 text-lg font-semibold">
+            {apiVersion.data ?? __APP_VERSION__}
+          </div>
         </div>
       </div>
     </div>
