@@ -19,6 +19,7 @@ import { OutboxDispatcherScheduler } from './schedulers/outbox-dispatcher.schedu
 import { MediaRetentionScheduler } from './schedulers/media-retention.scheduler';
 import { ReconciliationScheduler } from './schedulers/reconciliation.scheduler';
 import { SmsBalanceScheduler } from './schedulers/sms-balance.scheduler';
+import { SmsConcatScheduler } from './schedulers/sms-concat.scheduler';
 
 @Module({
   imports: [
@@ -48,6 +49,7 @@ import { SmsBalanceScheduler } from './schedulers/sms-balance.scheduler';
     MediaRetentionScheduler,
     ReconciliationScheduler,
     SmsBalanceScheduler,
+    SmsConcatScheduler,
     EventsService,
     RoutingService,
     AlertsService,

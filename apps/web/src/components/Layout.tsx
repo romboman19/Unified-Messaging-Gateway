@@ -1,4 +1,5 @@
 import { NavLink, Outlet } from 'react-router-dom';
+import { useQuery } from '@tanstack/react-query';
 import {
   LayoutDashboard,
   Radio,
@@ -31,10 +32,32 @@ export default function Layout() {
     window.location.href = '/login';
   }
 
+  // The API's own version, so a half-finished deploy (new panel, old API or
+  // the reverse) is visible instead of showing up as odd behaviour.
+  const apiVersion = useQuery({
+    queryKey: ['api-version'],
+    queryFn: async () => (await api.get<{ version: string }>('/health/version')).data.version,
+    staleTime: 5 * 60_000,
+  });
+  const mismatch = apiVersion.data && apiVersion.data !== __APP_VERSION__;
+
   return (
     <div className="flex min-h-screen">
       <aside className="flex w-64 flex-col border-r bg-white p-4">
-        <div className="mb-6 text-xl font-bold">UMG</div>
+        <div className="mb-6">
+          <div className="text-xl font-bold">UMG</div>
+          <div className="text-xs text-slate-400" title="Версія веб-панелі">
+            v{__APP_VERSION__}
+          </div>
+          {mismatch && (
+            <div
+              className="mt-1 text-xs text-amber-600"
+              title="Веб-панель і API різних версій — оновіть обидва контейнери"
+            >
+              API v{apiVersion.data}
+            </div>
+          )}
+        </div>
         <nav className="space-y-1">
           {nav.map((item) => (
             <NavLink

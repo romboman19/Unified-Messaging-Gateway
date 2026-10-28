@@ -436,3 +436,20 @@ model AlertRule {
 
   @@map("alert_rules")
 }
+
+/// Parts of a long SMS waiting for their siblings. Transports without a UDH
+/// (the GoIP SMS Server) deliver segments separately and out of order; they
+/// are held here until the set looks complete, then stored as one message.
+model SmsPartBuffer {
+  id         String   @id @default(uuid())
+  endpointId String   @map("endpoint_id")
+  sender     String
+  text       String
+  receivedAt DateTime @map("received_at")
+  /// The CanonicalInbound the adapter produced, so the flush can rebuild it.
+  inbound    Json
+  arrivedAt  DateTime @default(now()) @map("arrived_at")
+
+  @@index([endpointId, sender, arrivedAt])
+  @@map("sms_part_buffer")
+}
