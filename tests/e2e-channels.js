@@ -2,9 +2,13 @@ const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
 
-const BASE = 'http://umg-dev.example:8083';
+const BASE = process.env.UMG_BASE_URL || 'http://localhost:8083';
 const OUT = process.argv[2] || './screenshots-channels';
-const PASSWORD = process.env.UMG_ADMIN_PASSWORD || '<REDACTED>';
+const PASSWORD = process.env.UMG_ADMIN_PASSWORD;
+if (!PASSWORD) {
+  console.error('Set UMG_ADMIN_PASSWORD (and optionally UMG_BASE_URL) before running this test.');
+  process.exit(1);
+}
 
 (async () => {
   fs.mkdirSync(OUT, { recursive: true });
